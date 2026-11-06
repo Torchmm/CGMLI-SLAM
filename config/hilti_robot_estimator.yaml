@@ -1,0 +1,238 @@
+%YAML:1.0
+---
+# Hilti SLAM Challenge 2023 ROBOT, site2_robot_1/2/3 sensor platform.
+# Measured calibration: official calibration_robot archive entries in reference/.
+# Source: https://huggingface.co/datasets/Hilti-Research/hilti-slam-challenge-2023/blob/main/calibration/calibration.zip
+# Attribution: Hilti Research / UZH RPG, Hilti SLAM Challenge 2023.
+# Source and derived calibration: CC-BY-NC-SA-3.0; see reference/SOURCE.json.
+# IMPORTANT: algorithm settings, initial bias priors and input limits below are
+# engineering starting values, not measured Hilti sensor calibration or tuning.
+# Frames: S = xsens_imu_link; choose estimator body B = S, so T_BS = identity.
+# T_AB always maps coordinates from B to A: p_A = R_AB * p_B + t_AB.
+# Official T_here_imu0 is IMU -> camera; T_SC below is its rigid inverse.
+# Cameras keep RAW 1280x800 coordinates, pinhole + equidistant distortion.
+# No image rectification/resizing or per-camera timestamp modification is applied.
+
+cameras:
+  # Project camera 0 = official cam0 = front LEFT.
+  - camera_label: "front_left"
+    source_camera: "cam0"
+    rostopic: "/oak_cam_front/left/image_raw"
+    frame_id: "oak_cam_front_left_camera_optical_frame"
+    cam_model: "pinhole"
+    distortion_type: "equidistant"
+    image_dimension: [ 1280, 800 ]
+    focal_length: [ 567.76102391825657, 567.12930851657939 ]
+    principal_point: [ 651.55636483272997, 402.9081460847209 ]
+    distortion_coefficients: [ -0.0032589824594531436, 0.0043298136730001392, 0.0035601008360336764, -0.0020215769432520782 ]
+    # Row-major 4x4, CAMERA optical coordinates -> IMU sensor S.
+    T_SC: [ 0.0055915756568742023, -0.90590452374337782, -0.4234450709867294, 0.070461571371800646,
+            -0.99996264437537574, -0.0022742974118199269, -0.0083389103057431302, 0.02884711660668364,
+            0.0065912165400699996, 0.42347588057947932, -0.90588340002008838, -0.075683354314480797,
+            0.0, 0.0, 0.0, 1.0 ]
+    camera_type: "gray"
+    slam_use: "cgmli"
+
+  # Project camera 1 = official cam2 = left LEFT.
+  - camera_label: "left_left"
+    source_camera: "cam2"
+    rostopic: "/oak_cam_left/left/image_raw"
+    frame_id: "oak_cam_left_left_camera_optical_frame"
+    cam_model: "pinhole"
+    distortion_type: "equidistant"
+    image_dimension: [ 1280, 800 ]
+    focal_length: [ 564.13455767597748, 563.9250164758821 ]
+    principal_point: [ 657.75639796653672, 392.06898000435348 ]
+    distortion_coefficients: [ -0.018665240189435467, 0.057396025995108284, -0.058025762540321477, 0.021100477768187364 ]
+    # Row-major 4x4, CAMERA optical coordinates -> IMU sensor S.
+    T_SC: [ 0.035111852295056839, -0.97320077425599272, -0.22726066711145554, 0.25953401366772694,
+            -0.049387103357268758, -0.22881273182353037, 0.97221687281050062, 0.3853462017299315,
+            -0.9981623474417306, -0.022912589181209086, -0.056097606068571032, 0.68906343219045529,
+            0.0, 0.0, 0.0, 1.0 ]
+    camera_type: "gray"
+    slam_use: "cgmli"
+
+  # Project camera 2 = official cam4 = rear LEFT.
+  - camera_label: "rear_left"
+    source_camera: "cam4"
+    rostopic: "/oak_cam_rear/left/image_raw"
+    frame_id: "oak_cam_rear_left_camera_optical_frame"
+    cam_model: "pinhole"
+    distortion_type: "equidistant"
+    image_dimension: [ 1280, 800 ]
+    focal_length: [ 563.93417646199146, 563.97319678342501 ]
+    principal_point: [ 672.26008350318261, 413.0356180613399 ]
+    distortion_coefficients: [ 0.0051627342033332803, 0.0033327173074679094, -0.0013666248911747547, 0.0009071861063664735 ]
+    # Row-major 4x4, CAMERA optical coordinates -> IMU sensor S.
+    T_SC: [ 0.0052890453275915017, -0.90982268413110778, -0.41496350374459356, 0.23371073977026496,
+            0.99992692113989701, 0.00030068691283874349, 0.012085609917041329, -0.03848047161025818,
+            -0.010870987959202355, -0.41499710002341833, 0.9097577856731669, 1.386915685773813,
+            0.0, 0.0, 0.0, 1.0 ]
+    camera_type: "gray"
+    slam_use: "cgmli"
+
+  # Project camera 3 = official cam6 = right LEFT.
+  - camera_label: "right_left"
+    source_camera: "cam6"
+    rostopic: "/oak_cam_right/left/image_raw"
+    frame_id: "oak_cam_right_left_camera_optical_frame"
+    cam_model: "pinhole"
+    distortion_type: "equidistant"
+    image_dimension: [ 1280, 800 ]
+    focal_length: [ 564.30241988082287, 564.18852108305987 ]
+    principal_point: [ 659.61010333965351, 402.71244472939122 ]
+    distortion_coefficients: [ 0.0057251833598987757, 0.0011503795448596092, -0.0040160037683886771, 0.0031517753124459718 ]
+    # Row-major 4x4, CAMERA optical coordinates -> IMU sensor S.
+    T_SC: [ -0.016343167856192609, -0.9649561981242547, -0.26190157801358926, 0.25915632577268449,
+            0.015514350966614521, 0.26166029459597995, -0.96503533362568117, -0.39585693054777338,
+            0.99974607064919685, -0.019834967444614382, 0.010694311009226798, 0.63258359359031169,
+            0.0, 0.0, 0.0, 1.0 ]
+    camera_type: "gray"
+    slam_use: "cgmli"
+
+camera_parameters:
+  # Hilti offline reader: maximum span of four exposure midpoints [s].
+  # Complete four-camera bundles use their mean midpoint as one VIO node time.
+  # This is a synchronous approximation; original image times remain available.
+  timestamp_tolerance: 0.025
+  # t_node = mean(four image headers) + image_delay. Official report gives zero shift for
+  # all cameras. Do not change exposure midpoint into start-of-exposure here.
+  image_delay: 0.0
+  online_calibration:
+    do_extrinsics: true
+    estimate_camera_rig_translation: true # Release translation only after rotation/time warmup.
+    estimate_td_camera: true
+    # Shared residual delay in seconds. Total raw camera-to-IMU shift is image_delay + td_camera.
+    td_camera_initial_s: 0.0
+    sigma_td_camera_s: 0.005
+    max_td_change_s: 0.025
+    max_rig_translation_change_m: 0.10
+    max_rig_rotation_change_rad: 0.15
+    do_extrinsics_final_ba: false
+    # Prior widths in meters and radians.
+    sigma_r: 0.01
+    sigma_alpha: 0.01
+    sigma_r_final_ba: 0.01
+    sigma_alpha_final_ba: 0.01
+
+imu_parameters:
+  use: true
+  # Intentional coordinate choice B = S, not a claimed robot base_link extrinsic.
+  T_BS: [ 1.0, 0.0, 0.0, 0.0,
+          0.0, 1.0, 0.0, 0.0,
+          0.0, 0.0, 1.0, 0.0,
+          0.0, 0.0, 0.0, 1.0 ]
+  # Engineering input checks [m/s^2] and [rad/s]; not calibrated saturation data.
+  a_max: 160.0
+  g_max: 35.0
+  # Official gyroscope_noise_density [rad/s/sqrt(Hz), continuous gyro white noise]. Do not multiply by sqrt(200 Hz).
+  sigma_g_c: 0.00013548849713483453
+  # Official accelerometer_noise_density [m/s^2/sqrt(Hz), continuous acceleration white noise]. Do not multiply by sqrt(200 Hz).
+  sigma_a_c: 0.00067717845838848858
+  # Official gyroscope_random_walk [rad/s^2/sqrt(Hz), gyro bias diffusion]. Do not multiply by sqrt(200 Hz).
+  sigma_gw_c: 2.6867875817855036e-06
+  # Official accelerometer_random_walk [m/s^3/sqrt(Hz), acceleration bias diffusion]. Do not multiply by sqrt(200 Hz).
+  sigma_aw_c: 4.8555923907289822e-06
+  # Initial bias prior standard deviations; engineering choices [rad/s, m/s^2].
+  sigma_bg: 0.01
+  sigma_ba: 0.1
+  g0: [ 0.0, 0.0, 0.0 ]
+  a0: [ 0.0, 0.0, 0.0 ]
+  # Gravity magnitude default, not the target-frame gravity vector in the report.
+  g: 9.81
+  # The official model is calibrated; no additional scale correction is inferred.
+  s_a: [ 1.0, 1.0, 1.0 ]
+  # 200 Hz source nominal period is 5 ms. Gaps over this bound are terminal.
+  max_sample_gap: 0.05
+
+frontend_parameters:
+  max_num_keypoints: 150
+  # S2 parallax and accumulated motion drive keyframes; low pixel coverage alone
+  # must not evict the oldest mature anchors during a stationary interval.
+  keyframe_parallax: 0.015
+  keyframe_translation: 0.10    
+  keyframe_rotation: 0.10
+  keyframe_min_shared_tracks: 20
+  keyframe_low_motion_translation: 0.015
+  keyframe_low_motion_rotation: 0.015
+  parallelise_detection: true
+  num_matching_threads: 4 # Parallel camera-pair jobs; track assignment remains deterministic.
+  # Native extractor uses GravityCameraAware + SparseBox by default.
+  orb_pyramid_levels: 8
+  orb_scale_factor: 1.2
+  orb_fast_threshold: 20
+  # Shared high-threshold scans + selective low-threshold ROI fallback; false selects the ROI reference.
+  max_promotions_per_frame: 100
+  max_active_initialized: 500
+  orb_layer_fast: true
+  # Whole-layer raw FAST reference: strip scans regressed in the previous replay.
+  orb_boundary_fast: false
+  # Small valid geometry batches, replenished up to the original per-cell cap.
+  orb_adaptive_geometry: true
+  orb_grouped_balancing: true
+  orb_batch_descriptor_coordinates: true
+  pose_analytic_absolute_jacobians: true
+  # Healthy prediction: minimum 20 samples; full 50-floor run every 30 frames or on fallback.
+  pose_adaptive_ransac: true
+  # Map first, recent-frame/stereo seeds, then broaden if support/motion requires it.
+  orb_staged_matching: true
+  # All accepted frames keep new tracks; only stable, supported seeds gain rho.
+  require_keyframe_anchor_for_promotion: true
+  max_tracking_seeds: 1000 # Whole rig; separate from optimized landmark admission.
+  seed_max_untracked_seconds: 0.5 # Last-observation age; actively tracked seeds do not expire.
+  orb_min_fast_threshold: 7
+  # 0 chooses the selected front camera's fu as one common rig reference.
+  orb_virtual_focal_length: 0.0
+  orb_matching_threshold: 64
+
+estimator_parameters:
+  # Retain 10 image-frame states. A new image group temporarily occupies slot 11;
+  # optimize, then marginalize the oldest or second-newest frame back to 10.
+  # IMU samples provide inter-frame factors, never a separate frame quota.
+  window_size: 10
+  # Start with local VIO for debugging, without vocabulary/global-BA dependence.
+  do_loop_closures: false
+  do_final_ba: false
+  # Enable to limit cumulative Ceres Solve time; frontend/gate/build/marginalization are excluded.
+  enforce_realtime: true
+  realtime_min_iterations: 2
+  realtime_max_iterations: 8
+  realtime_time_limit: 0.04 # 40 ms for Ceres across initial solve + outlier refits; soft minimum-iteration limit.
+  realtime_num_threads: 4
+  # Kept valid if global processing is explicitly enabled later.
+  full_graph_iterations: 30
+  full_graph_num_threads: 4
+  p_dbow: 0.6
+  backend_max_retries: 1
+  visual_nis_threshold: 9.210340371976184
+  skip_pre_nis_when_tracking_healthy: true # Keep the full post-solve gate before marginalization.
+  parallel_marginalization_accumulation: true # Use bounded thread-local normal equations on larger systems.
+  max_imu_interval_seconds: 10.0
+  incremental_imu: true
+  preserve_oldest_visual_information: true
+  # Small state separator: compare with false (SPARSE_SCHUR) on the same input.
+  backend_dense_schur: true
+  cache_visual_pairs: true
+  max_visual_imu_rotation_error: 0.2
+  max_visual_imu_position_error: 0.5
+  max_visual_imu_position_error_rate: 2.0
+
+output_parameters:
+  # Master switch for feature/match/reprojection debug views; disabled for normal runs.
+  display_matches: true
+  display_overhead: true
+
+# Reference only: intentionally NOT an active `lidar:` block. The current VIO
+# reader ignores this block, and the offline application reads LiDAR without fusion.
+# No fabricated elevation/azimuth resolution is supplied for a nonuniform sensor.
+# This measured transform is ready for a future point-cloud fusion adapter.
+lidar_reference:
+  rostopic: "/rslidar_points"
+  frame_id: "rslidar"
+  # LIDAR -> IMU; inverse of official lidar0.T_here_imu0.
+  T_SL: [ 0.99938090824229964, -0.0036988105559615262, 0.034987412611787179, 0.13372435098296154,
+          -0.0033972729287833469, -0.99995660930301822, -0.0086739868491097997, -0.011301799498041736,
+          0.035017977917688119, 0.0085497550656309183, -0.99935011027711107, 0.010893033077978013,
+          0.0, 0.0, 0.0, 1.0 ]
+  point_timestamp: "float64_absolute_seconds"
+  header_timestamp: "last_point"

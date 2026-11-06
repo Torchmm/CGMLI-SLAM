@@ -1,0 +1,28 @@
+{
+  "source": "https://huggingface.co/datasets/Hilti-Research/hilti-slam-challenge-2023/resolve/main/calibration/calibration.zip",
+  "archive_sha256_published": "3ec8fe7de003a30c72b6ebc79668f16a0ebdf48d253e1c94f61157fbe4e8ec60",
+  "verification": "ZIP entry CRC checked; full 92 MB archive was not downloaded or hashed",
+  "license": "CC-BY-NC-SA-3.0",
+  "files": {
+    "calibration.txt": {
+      "zip_crc32": "15b0b9e4",
+      "bytes": 13285
+    },
+    "calibration.yaml": {
+      "zip_crc32": "9c3bc4d8",
+      "bytes": 2474
+    },
+    "calibration_cams.yaml": {
+      "zip_crc32": "6ceca2b7",
+      "bytes": 6976
+    },
+    "calibration_imu.yaml": {
+      "zip_crc32": "f496c8c5",
+      "bytes": 411
+    },
+    "calibration_lidar.yaml": {
+      "zip_crc32": "b939cec2",
+      "bytes": 444
+    }
+  }
+}

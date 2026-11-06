@@ -1,0 +1,449 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="源文件">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="头文件">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="资源文件">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="源文件\kinematics">
+      <UniqueIdentifier>{f71a0899-e2a2-4ab8-8eef-a26a7368dd41}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\common">
+      <UniqueIdentifier>{cfb53f25-8dcc-4ff8-b9d6-15aaaf245d15}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\utils">
+      <UniqueIdentifier>{cd20937e-e9bd-4cf6-8fa9-1565ee5f8101}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\cameras">
+      <UniqueIdentifier>{7ff6bfe2-2276-46bd-a5a1-91aed25a975e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\visual">
+      <UniqueIdentifier>{cbabbae1-9f00-4c71-97fe-4a67244e4965}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\logging">
+      <UniqueIdentifier>{8ce5818b-9592-400e-b408-5e5b699593ca}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\frontend">
+      <UniqueIdentifier>{54e43913-3301-45b9-a8c3-1cf7ad4181ca}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\visual\features">
+      <UniqueIdentifier>{3183a001-a553-46fa-95e4-1ce0a69f91db}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\visual\pose_solver">
+      <UniqueIdentifier>{2e0c34a4-29b5-46b0-9a08-ab08d9c0c1b6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\pipeline">
+      <UniqueIdentifier>{27408857-00b7-41af-a5af-c6ad15f61026}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\utils\Duration.cpp">
+      <Filter>源文件\utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\utils\Time.cpp">
+      <Filter>源文件\utils</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\cameras\CameraBase.cpp">
+      <Filter>源文件\cameras</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\cameras\NCameraSystem.cpp">
+      <Filter>源文件\cameras</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\common\ViInterface.cpp">
+      <Filter>源文件\common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\common\ViParametersReader.cpp">
+      <Filter>源文件\common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\frontend\stereo_triangulation.cpp">
+      <Filter>源文件\frontend</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\visual\features\OrbFeatureExtractor.cpp">
+      <Filter>源文件\visual\features</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\visual\features\OrbFrameAdapter.cpp">
+      <Filter>源文件\visual\features</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\visual\features\OrbMatcher.cpp">
+      <Filter>源文件\visual\features</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\visual\pose_solver\AbsolutePoseSolver.cpp">
+      <Filter>源文件\visual\pose_solver</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\visual\pose_solver\PoseSolverTypes.cpp">
+      <Filter>源文件\visual\pose_solver</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\visual\pose_solver\RelativePoseSolver.cpp">
+      <Filter>源文件\visual\pose_solver</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\pipeline\ThreadedSlam.cpp">
+      <Filter>源文件\pipeline</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\frontend\Frontend.cpp">
+      <Filter>源文件\frontend</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\src\kinematics\operators.hpp">
+      <Filter>源文件\kinematics</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\kinematics\Transformation.hpp">
+      <Filter>源文件\kinematics</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\assert_macros.hpp">
+      <Filter>源文件\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\Duration.h">
+      <Filter>源文件\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\source_file_pos.hpp">
+      <Filter>源文件\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\Time.h">
+      <Filter>源文件\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\cameras\CameraBase.hpp">
+      <Filter>源文件\cameras</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\cameras\DistortionBase.hpp">
+      <Filter>源文件\cameras</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\cameras\EquidistantDistortion.hpp">
+      <Filter>源文件\cameras</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\cameras\EucmCamera.hpp">
+      <Filter>源文件\cameras</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\cameras\NCameraSystem.hpp">
+      <Filter>源文件\cameras</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\cameras\NoDistortion.hpp">
+      <Filter>源文件\cameras</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\cameras\PinholeCamera.hpp">
+      <Filter>源文件\cameras</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\cameras\RadialTangentialDistortion.hpp">
+      <Filter>源文件\cameras</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\cameras\RadialTangentialDistortion8.hpp">
+      <Filter>源文件\cameras</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\common\FrameTypedefs.hpp">
+      <Filter>源文件\common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\common\Measurements.hpp">
+      <Filter>源文件\common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\common\Parameters.hpp">
+      <Filter>源文件\common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\Frame.hpp">
+      <Filter>源文件\visual</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\MultiFrame.hpp">
+      <Filter>源文件\visual</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\logging\logger.hpp">
+      <Filter>源文件\logging</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\common\ViFrontendInterface.hpp">
+      <Filter>源文件\common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\common\ViInterface.hpp">
+      <Filter>源文件\common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\common\ViParametersReader.hpp">
+      <Filter>源文件\common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\frontend\stereo_triangulation.hpp">
+      <Filter>源文件\frontend</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\features\OrbFeatureExtractor.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\features\OrbFrameAdapter.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\features\OrbMatcher.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\pose_solver\AbsolutePoseSolver.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\pose_solver\PoseEstimatorAdapter.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\pose_solver\PoseSolverInternal.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\pose_solver\PoseSolverTypes.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\pose_solver\RelativePoseSolver.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\features\OrbBriefPattern.hpp">
+      <Filter>源文件\visual\features</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\features\OrbCameraAwareSampling.hpp">
+      <Filter>源文件\visual\features</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\features\OrbSparseSampling.hpp">
+      <Filter>源文件\visual\features</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\pipeline\ThreadedSlam.hpp">
+      <Filter>源文件\pipeline</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\frontend\Frontend.hpp">
+      <Filter>源文件\frontend</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="源文件\backend">
+      <UniqueIdentifier>{bf7f6843-d3b9-41c7-8898-1b8158f81af9}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\backend\BackendFactors.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\backend\BackendFactors.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClCompile Include="..\src\backend\BackendOptimizer.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\backend\BackendOptimizer.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\backend\BackendProblem.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClCompile Include="..\src\backend\BackendTypes.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\backend\BackendTypes.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClCompile Include="..\src\backend\FixedLagBackend.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\backend\FixedLagBackend.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClCompile Include="..\src\backend\LeftSE3Manifold.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\backend\LeftSE3Manifold.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClCompile Include="..\src\backend\MarginalizationPrior.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\backend\MarginalizationPrior.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClCompile Include="..\src\backend\Marginalizer.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\backend\Marginalizer.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClCompile Include="..\src\backend\ProjectBackendAdapter.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\backend\ProjectBackendAdapter.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClCompile Include="..\src\backend\SlidingWindowManager.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\backend\SlidingWindowManager.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <None Include="..\src\backend\README.md">
+      <Filter>源文件\backend</Filter>
+    </None>
+    <None Include="..\src\backend\tests\ManagedWindowRegression.cpp">
+      <Filter>源文件\backend</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\backend\FrameStore.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\backend\FrameStore.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClCompile Include="..\src\backend\LandmarkReanchoring.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\backend\LandmarkStore.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\backend\LandmarkStore.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClCompile Include="..\src\backend\SlidingWindowData.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\backend\ViSlamBackend.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\backend\ViSlamBackend.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\backend\WindowDataTypes.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClCompile Include="..\src\backend\WindowVisualFactor.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\backend\WindowVisualFactor.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <None Include="..\src\backend\legacy\ViSlamBackend.hpp.reference">
+      <Filter>源文件\backend</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\frontend\OrbFrontendFeatures.cpp">
+      <Filter>源文件\frontend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\frontend\OrbFrontendFeatures.hpp">
+      <Filter>源文件\frontend</Filter>
+    </ClInclude>
+    <None Include="..\src\frontend\tests\FrontendOrbRegression.cpp">
+      <Filter>源文件\frontend</Filter>
+    </None>
+    <None Include="..\src\frontend\README.md">
+      <Filter>源文件\frontend</Filter>
+    </None>
+    <None Include="..\src\frontend\tools\check_frontend_orb_static.ps1">
+      <Filter>源文件\frontend</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\visual\pose_solver\RotationPoseSolver.cpp">
+      <Filter>源文件\visual\pose_solver</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\visual\pose_solver\RotationPoseSolver.hpp">
+      <Filter>源文件\visual\pose_solver</Filter>
+    </ClInclude>
+    <ClCompile Include="..\src\frontend\FrontendPoseAdapter.cpp">
+      <Filter>源文件\frontend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\frontend\FrontendPoseAdapter.hpp">
+      <Filter>源文件\frontend</Filter>
+    </ClInclude>
+    <None Include="..\src\frontend\tests\FrontendPoseRegression.cpp">
+      <Filter>源文件\frontend</Filter>
+    </None>
+    <None Include="..\src\frontend\tools\check_frontend_pose_static.ps1">
+      <Filter>源文件\frontend</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\frontend\FrontendAssociation.cpp">
+      <Filter>源文件\frontend</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\frontend\FrontendAssociation.hpp">
+      <Filter>源文件\frontend</Filter>
+    </ClInclude>
+    <None Include="..\src\frontend\tests\FrontendBackendRegression.cpp">
+      <Filter>源文件\frontend</Filter>
+    </None>
+    <None Include="..\src\frontend\tools\check_frontend_backend_static.ps1">
+      <Filter>源文件\frontend</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\src\pipeline\tools\check_pipeline_static.ps1">
+      <Filter>源文件\pipeline</Filter>
+    </None>
+    <None Include="..\src\pipeline\README.md">
+      <Filter>源文件\pipeline</Filter>
+    </None>
+    <None Include="..\src\pipeline\legacy\ThreadedSlam.cpp.reference">
+      <Filter>源文件\pipeline</Filter>
+    </None>
+    <None Include="..\src\pipeline\legacy\ThreadedSlam.hpp.reference">
+      <Filter>源文件\pipeline</Filter>
+    </None>
+    <ClCompile Include="..\src\visualization\ViVisualizer.cpp">
+      <Filter>源文件\visualization</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\visualization\ViVisualizer.hpp">
+      <Filter>源文件\visualization</Filter>
+    </ClInclude>
+    <ClCompile Include="..\src\utils\Timer.cpp">
+      <Filter>源文件\utils</Filter>
+    </ClCompile>
+    <ClInclude Include="..\src\utils\Timer.hpp">
+      <Filter>源文件\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\utils\ThreadsafeQueue.hpp">
+      <Filter>源文件\utils</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="源文件\visualization"><UniqueIdentifier>{DD2D37A1-9B46-4B6E-8E8A-BD937D14CB80}</UniqueIdentifier></Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="源文件\factor"><UniqueIdentifier>{EDA153E3-E2A3-4C1F-8331-1E433385FD73}</UniqueIdentifier></Filter>
+    <ClCompile Include="..\src\factor\ImuError.cpp"><Filter>源文件\factor</Filter></ClCompile>
+    <ClInclude Include="..\src\factor\ImuError.hpp"><Filter>源文件\factor</Filter></ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\factor\ErrorInterface.cpp"><Filter>源文件\factor</Filter></ClCompile>
+    <ClInclude Include="..\src\factor\ErrorInterface.hpp"><Filter>源文件\factor</Filter></ClInclude>
+    <ClCompile Include="..\src\factor\PoseLocalParameterization.cpp"><Filter>源文件\factor</Filter></ClCompile>
+    <ClInclude Include="..\src\factor\PoseLocalParameterization.hpp"><Filter>源文件\factor</Filter></ClInclude>
+    <ClCompile Include="..\src\factor\BodyImuFactor.cpp"><Filter>源文件\factor</Filter></ClCompile>
+    <ClInclude Include="..\src\factor\BodyImuFactor.hpp"><Filter>源文件\factor</Filter></ClInclude>
+    <ClInclude Include="..\src\factor\ode.hpp"><Filter>源文件\factor</Filter></ClInclude>
+    <ClInclude Include="..\src\factor\PseudoInverse.hpp"><Filter>源文件\factor</Filter></ClInclude>
+    <ClCompile Include="..\src\backend\GlobalSlamGraph.cpp"><Filter>源文件\backend</Filter></ClCompile>
+    <ClInclude Include="..\src\backend\GlobalSlamGraph.hpp"><Filter>源文件\backend</Filter></ClInclude>
+    <ClCompile Include="..\src\pipeline\StateOutput.cpp"><Filter>源文件\pipeline</Filter></ClCompile>
+    <ClInclude Include="..\src\pipeline\StateOutput.hpp"><Filter>源文件\pipeline</Filter></ClInclude>
+    <None Include="..\src\pipeline\tests\NativeSlamRegression.cpp"><Filter>源文件\pipeline</Filter></None>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="源文件\offline"><UniqueIdentifier>{2d6e0be5-9bdc-4828-aea8-2090dbdfbf5f}</UniqueIdentifier></Filter>
+    <Filter Include="源文件\app"><UniqueIdentifier>{0d19d79b-fad7-4ae0-9120-5b611eed88ca}</UniqueIdentifier></Filter>
+    <ClCompile Include="..\src\offline\HiltiBinReader.cpp"><Filter>源文件\offline</Filter></ClCompile>
+    <ClInclude Include="..\src\offline\HiltiBinReader.hpp"><Filter>源文件\offline</Filter></ClInclude>
+    <ClCompile Include="..\src\offline\HiltiDatasetReader.cpp"><Filter>源文件\offline</Filter></ClCompile>
+    <ClInclude Include="..\src\offline\HiltiDatasetReader.hpp"><Filter>源文件\offline</Filter></ClInclude>
+    <ClCompile Include="..\src\app\offline_main.cpp"><Filter>源文件\app</Filter></ClCompile>
+    <None Include="..\src\offline\tests\HiltiOfflineRegression.cpp"><Filter>源文件\offline</Filter></None>
+    <None Include="..\src\offline\README.md"><Filter>源文件\offline</Filter></None>
+    <None Include="..\src\offline\tools\check_offline_static.ps1"><Filter>源文件\offline</Filter></None>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Configuration"><UniqueIdentifier>{32f20d55-a0b7-4dd1-ad81-c68b6bd3e0d1}</UniqueIdentifier></Filter>
+    <None Include="..\config\hilti_robot_estimator.yaml"><Filter>Configuration</Filter></None>
+    <None Include="..\config\README.md"><Filter>Configuration</Filter></None>
+    <None Include="..\config\tools\check_hilti_config.py"><Filter>Configuration</Filter></None>
+    <None Include="..\config\reference\hilti2023_robot\SOURCE.json"><Filter>Configuration</Filter></None>
+    <None Include="..\config\reference\hilti2023_robot\calibration.txt"><Filter>Configuration</Filter></None>
+    <None Include="..\config\reference\hilti2023_robot\calibration.yaml"><Filter>Configuration</Filter></None>
+    <None Include="..\config\reference\hilti2023_robot\calibration_cams.yaml"><Filter>Configuration</Filter></None>
+    <None Include="..\config\reference\hilti2023_robot\calibration_imu.yaml"><Filter>Configuration</Filter></None>
+    <None Include="..\config\reference\hilti2023_robot\calibration_lidar.yaml"><Filter>Configuration</Filter></None>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\app\CsvOffline.cpp"><Filter>源文件\app</Filter></ClCompile>
+    <ClInclude Include="..\src\app\CsvOffline.hpp"><Filter>源文件\app</Filter></ClInclude>
+  </ItemGroup>
+</Project>

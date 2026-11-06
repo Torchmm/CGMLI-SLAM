@@ -1,0 +1,16 @@
+/logs/
+/results/
+/debug_results/
+/ChatGPT 图像*.jpg
+/MultiFisheye_LiDAR_IMU_SLAM_Algorithm_Framework_V1.10.docx
+
+.vs/
+/CGMLI-SLAM/x64/
+/CGMLI-SLAM/CGMLI-SLAM/x64/
+/CGMLI-SLAM/module_debug/x64/
+*.vcxproj.user
+*.suo
+
+__pycache__/
+*_static_report.json
+static_check_camera_aware_report.txt

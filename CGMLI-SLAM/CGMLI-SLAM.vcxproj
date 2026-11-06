@@ -1,0 +1,303 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{cc812ea0-c94a-4055-9aa3-c887cfc2bb22}</ProjectGuid>
+    <RootNamespace>CGMLISLAM</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros">
+    <PoseLibRoot Condition="'$(PoseLibRoot)'==''">$(ProjectDir)..\..\vs2022\poselib2.0.5</PoseLibRoot>
+    <PoseLibLibraryName Condition="'$(PoseLibLibraryName)'=='' and '$(Configuration)'=='Debug'">PoseLibd.lib</PoseLibLibraryName>
+    <PoseLibLibraryName Condition="'$(PoseLibLibraryName)'==''">PoseLib.lib</PoseLibLibraryName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>GLOG_NO_ABBREVIATED_SEVERITIES;WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>GLOG_NO_ABBREVIATED_SEVERITIES;WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>GLOG_NO_ABBREVIATED_SEVERITIES;_DEBUG;_CONSOLE;%(PreprocessorDefinitions);_USE_MATH_DEFINES;NOMINMAX;_CRT_SECURE_NO_WARNINGS</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalIncludeDirectories>..\..\vs2022\eigen3.4.0\include\eigen3;..\..\vs2022\opencv4.8.0\include;..\..\vs2022\glog0.3.5\include;..\..\vs2022\gflags2.2.0\Include;..\..\vs2022\ceres-solver2.2.0\include;..\..\vs2022\yaml_cpp0.7.0\include;..\..\vs2022\DBoW21.1\include;..\..\vs2022\PCL_1.15\PCL 1.15.0\include\pcl-1.15;..\src;$(PoseLibRoot)\include;..\..\vs2022\PCL_1.15\PCL 1.15.0\3rdParty\Boost\include\boost-1_87;..\vs2022\PCL_1.15\PCL 1.15.0\3rdParty\FLANN\include;H:\BaiduSyncdisk\vs2022\tbb\2023.0\include;G:\project\BOT202404_mss\source_code\slam_visualization_qt\QtApplication1\install\include;F:\ThirtyLib\vs2022\glm0.9.3.2;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;H:\BaiduSyncdisk\vs2022\poselib2.0.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalOptions>/utf-8 /bigobj %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>..\..\vs2022\opencv4.8.0\x64\vc17\lib;..\..\vs2022\glog0.3.5\lib;..\..\vs2022\gflags2.2.0\Lib;..\..\vs2022\ceres-solver2.2.0\lib;..\..\vs2022\tbb\2023.0\lib;..\..\vs2022\PCL_1.15\PCL 1.15.0\lib;..\..\vs2022\yaml_cpp0.7.0\lib;..\..\vs2022\DBoW21.1\lib;..\..\vs2022\poselib2.0.5\lib;G:\project\BOT202404_mss\source_code\slam_visualization_qt\QtApplication1\install\lib\x64\Release;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>DBoW2d.lib;$(PoseLibLibraryName);opencv_world480d.lib;glogd.lib;gflagsd.lib;ceres-debug.lib;tbb_debug.lib;pcl_kdtreed.lib;pcl_filtersd.lib;yaml-cppd.lib;slam_visualization_tool.lib;pcl_iod.lib;pcl_commond.lib;cudart_static.lib;PoseLibd.lib</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>GLOG_NO_ABBREVIATED_SEVERITIES;NDEBUG;_CONSOLE;%(PreprocessorDefinitions);_USE_MATH_DEFINES;NOMINMAX;_CRT_SECURE_NO_WARNINGS</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalIncludeDirectories>..\..\vs2022\eigen3.4.0\include\eigen3;..\..\vs2022\opencv4.8.0\include;..\..\vs2022\glog0.3.5\include;..\..\vs2022\gflags2.2.0\Include;..\..\vs2022\ceres-solver2.2.0\include;..\..\vs2022\yaml_cpp0.7.0\include;..\..\vs2022\DBoW21.1\include;..\..\vs2022\PCL_1.15\PCL 1.15.0\include\pcl-1.15;..\src;$(PoseLibRoot)\include;..\..\vs2022\PCL_1.15\PCL 1.15.0\3rdParty\Boost\include\boost-1_87;..\vs2022\PCL_1.15\PCL 1.15.0\3rdParty\FLANN\include;H:\BaiduSyncdisk\vs2022\tbb\2023.0\include;G:\project\BOT202404_mss\source_code\slam_visualization_qt\QtApplication1\install\include;F:\ThirtyLib\vs2022\glm0.9.3.2;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;H:\BaiduSyncdisk\vs2022\poselib2.0.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalOptions>/utf-8 /bigobj %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>..\..\vs2022\opencv4.8.0\x64\vc17\lib;..\..\vs2022\glog0.3.5\lib;..\..\vs2022\gflags2.2.0\Lib;..\..\vs2022\ceres-solver2.2.0\lib;..\..\vs2022\tbb\2023.0\lib;..\..\vs2022\PCL_1.15\PCL 1.15.0\lib;..\..\vs2022\yaml_cpp0.7.0\lib;..\..\vs2022\DBoW21.1\lib;..\..\vs2022\poselib2.0.5\lib;G:\project\BOT202404_mss\source_code\slam_visualization_qt\QtApplication1\install\lib\x64\Release;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>DBoW2.lib;$(PoseLibLibraryName);opencv_world480.lib;glog.lib;gflags.lib;ceres.lib;tbb.lib;pcl_kdtree.lib;pcl_filters.lib;yaml-cpp.lib;slam_visualization_tool.lib;pcl_io.lib;pcl_common.lib;cudart_static.lib;PoseLib.lib</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\cameras\CameraBase.cpp" />
+    <ClCompile Include="..\src\cameras\NCameraSystem.cpp" />
+    <ClCompile Include="..\src\common\ViInterface.cpp" />
+    <ClCompile Include="..\src\common\ViParametersReader.cpp" />
+    <ClCompile Include="..\src\frontend\Frontend.cpp" />
+    <ClCompile Include="..\src\frontend\stereo_triangulation.cpp" />
+    <ClCompile Include="..\src\pipeline\ThreadedSlam.cpp" />
+    <ClCompile Include="..\src\utils\Duration.cpp" />
+    <ClCompile Include="..\src\utils\Time.cpp" />
+    <ClCompile Include="..\src\visual\features\OrbFeatureExtractor.cpp" />
+    <ClCompile Include="..\src\visual\features\OrbFrameAdapter.cpp" />
+    <ClCompile Include="..\src\visual\features\OrbMatcher.cpp" />
+    <ClCompile Include="..\src\visual\pose_solver\AbsolutePoseSolver.cpp" />
+    <ClCompile Include="..\src\visual\pose_solver\PoseSolverTypes.cpp" />
+    <ClCompile Include="..\src\visual\pose_solver\RelativePoseSolver.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\src\cameras\CameraBase.hpp" />
+    <ClInclude Include="..\src\cameras\DistortionBase.hpp" />
+    <ClInclude Include="..\src\cameras\EquidistantDistortion.hpp" />
+    <ClInclude Include="..\src\cameras\EucmCamera.hpp" />
+    <ClInclude Include="..\src\cameras\NCameraSystem.hpp" />
+    <ClInclude Include="..\src\cameras\NoDistortion.hpp" />
+    <ClInclude Include="..\src\cameras\PinholeCamera.hpp" />
+    <ClInclude Include="..\src\cameras\RadialTangentialDistortion.hpp" />
+    <ClInclude Include="..\src\cameras\RadialTangentialDistortion8.hpp" />
+    <ClInclude Include="..\src\common\FrameTypedefs.hpp" />
+    <ClInclude Include="..\src\common\Measurements.hpp" />
+    <ClInclude Include="..\src\common\Parameters.hpp" />
+    <ClInclude Include="..\src\common\ViFrontendInterface.hpp" />
+    <ClInclude Include="..\src\common\ViInterface.hpp" />
+    <ClInclude Include="..\src\common\ViParametersReader.hpp" />
+    <ClInclude Include="..\src\frontend\Frontend.hpp" />
+    <ClInclude Include="..\src\frontend\stereo_triangulation.hpp" />
+    <ClInclude Include="..\src\kinematics\operators.hpp" />
+    <ClInclude Include="..\src\kinematics\Transformation.hpp" />
+    <ClInclude Include="..\src\logging\logger.hpp" />
+    <ClInclude Include="..\src\pipeline\ThreadedSlam.hpp" />
+    <ClInclude Include="..\src\utils\assert_macros.hpp" />
+    <ClInclude Include="..\src\utils\Duration.h" />
+    <ClInclude Include="..\src\utils\source_file_pos.hpp" />
+    <ClInclude Include="..\src\utils\Time.h" />
+    <ClInclude Include="..\src\visual\features\OrbBriefPattern.hpp" />
+    <ClInclude Include="..\src\visual\features\OrbCameraAwareSampling.hpp" />
+    <ClInclude Include="..\src\visual\features\OrbSparseSampling.hpp" />
+    <ClInclude Include="..\src\visual\features\OrbFeatureExtractor.hpp" />
+    <ClInclude Include="..\src\visual\features\OrbFrameAdapter.hpp" />
+    <ClInclude Include="..\src\visual\features\OrbMatcher.hpp" />
+    <ClInclude Include="..\src\visual\Frame.hpp" />
+    <ClInclude Include="..\src\visual\MultiFrame.hpp" />
+    <ClInclude Include="..\src\visual\pose_solver\AbsolutePoseSolver.hpp" />
+    <ClInclude Include="..\src\visual\pose_solver\PoseEstimatorAdapter.hpp" />
+    <ClInclude Include="..\src\visual\pose_solver\PoseSolverInternal.hpp" />
+    <ClInclude Include="..\src\visual\pose_solver\PoseSolverTypes.hpp" />
+    <ClInclude Include="..\src\visual\pose_solver\RelativePoseSolver.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\backend\BackendFactors.cpp" />
+    <ClInclude Include="..\src\backend\BackendFactors.hpp" />
+    <ClCompile Include="..\src\backend\BackendOptimizer.cpp" />
+    <ClInclude Include="..\src\backend\BackendOptimizer.hpp" />
+    <ClInclude Include="..\src\backend\BackendProblem.hpp" />
+    <ClCompile Include="..\src\backend\BackendTypes.cpp" />
+    <ClInclude Include="..\src\backend\BackendTypes.hpp" />
+    <ClCompile Include="..\src\backend\FixedLagBackend.cpp" />
+    <ClInclude Include="..\src\backend\FixedLagBackend.hpp" />
+    <ClCompile Include="..\src\backend\LeftSE3Manifold.cpp" />
+    <ClInclude Include="..\src\backend\LeftSE3Manifold.hpp" />
+    <ClCompile Include="..\src\backend\MarginalizationPrior.cpp" />
+    <ClInclude Include="..\src\backend\MarginalizationPrior.hpp" />
+    <ClCompile Include="..\src\backend\Marginalizer.cpp" />
+    <ClInclude Include="..\src\backend\Marginalizer.hpp" />
+    <ClCompile Include="..\src\backend\ProjectBackendAdapter.cpp" />
+    <ClInclude Include="..\src\backend\ProjectBackendAdapter.hpp" />
+    <ClCompile Include="..\src\backend\SlidingWindowManager.cpp" />
+    <ClInclude Include="..\src\backend\SlidingWindowManager.hpp" />
+    <None Include="..\src\backend\README.md" />
+    <None Include="..\src\backend\tests\ManagedWindowRegression.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\backend\FrameStore.cpp" />
+    <ClInclude Include="..\src\backend\FrameStore.hpp" />
+    <ClCompile Include="..\src\backend\LandmarkReanchoring.cpp" />
+    <ClCompile Include="..\src\backend\LandmarkStore.cpp" />
+    <ClInclude Include="..\src\backend\LandmarkStore.hpp" />
+    <ClCompile Include="..\src\backend\SlidingWindowData.cpp" />
+    <ClCompile Include="..\src\backend\ViSlamBackend.cpp" />
+    <ClInclude Include="..\src\backend\ViSlamBackend.hpp" />
+    <ClInclude Include="..\src\backend\WindowDataTypes.hpp" />
+    <ClCompile Include="..\src\backend\WindowVisualFactor.cpp" />
+    <ClInclude Include="..\src\backend\WindowVisualFactor.hpp" />
+    <None Include="..\src\backend\legacy\ViSlamBackend.hpp.reference" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\frontend\OrbFrontendFeatures.cpp" />
+    <ClInclude Include="..\src\frontend\OrbFrontendFeatures.hpp" />
+    <None Include="..\src\frontend\tests\FrontendOrbRegression.cpp" />
+    <None Include="..\src\frontend\README.md" />
+    <None Include="..\src\frontend\tools\check_frontend_orb_static.ps1" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\visual\pose_solver\RotationPoseSolver.cpp" />
+    <ClInclude Include="..\src\visual\pose_solver\RotationPoseSolver.hpp" />
+    <ClCompile Include="..\src\frontend\FrontendPoseAdapter.cpp" />
+    <ClInclude Include="..\src\frontend\FrontendPoseAdapter.hpp" />
+    <None Include="..\src\frontend\tests\FrontendPoseRegression.cpp" />
+    <None Include="..\src\frontend\tools\check_frontend_pose_static.ps1" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\frontend\FrontendAssociation.cpp" />
+    <ClInclude Include="..\src\frontend\FrontendAssociation.hpp" />
+    <None Include="..\src\frontend\tests\FrontendBackendRegression.cpp" />
+    <None Include="..\src\frontend\tools\check_frontend_backend_static.ps1" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\src\pipeline\tools\check_pipeline_static.ps1" />
+    <None Include="..\src\pipeline\README.md" />
+    <None Include="..\src\pipeline\legacy\ThreadedSlam.cpp.reference" />
+    <None Include="..\src\pipeline\legacy\ThreadedSlam.hpp.reference" />
+    <ClCompile Include="..\src\visualization\ViVisualizer.cpp" />
+    <ClInclude Include="..\src\visualization\ViVisualizer.hpp" />
+    <ClCompile Include="..\src\utils\Timer.cpp" />
+    <ClInclude Include="..\src\utils\Timer.hpp" />
+    <ClInclude Include="..\src\utils\ThreadsafeQueue.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\factor\ImuError.cpp" />
+    <ClInclude Include="..\src\factor\ImuError.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\factor\ErrorInterface.cpp" />
+    <ClInclude Include="..\src\factor\ErrorInterface.hpp" />
+    <ClCompile Include="..\src\factor\PoseLocalParameterization.cpp" />
+    <ClInclude Include="..\src\factor\PoseLocalParameterization.hpp" />
+    <ClCompile Include="..\src\factor\BodyImuFactor.cpp" />
+    <ClInclude Include="..\src\factor\BodyImuFactor.hpp" />
+    <ClInclude Include="..\src\factor\ode.hpp" />
+    <ClInclude Include="..\src\factor\PseudoInverse.hpp" />
+    <ClCompile Include="..\src\backend\GlobalSlamGraph.cpp" />
+    <ClInclude Include="..\src\backend\GlobalSlamGraph.hpp" />
+    <ClCompile Include="..\src\pipeline\StateOutput.cpp" />
+    <ClInclude Include="..\src\pipeline\StateOutput.hpp" />
+    <None Include="..\src\pipeline\tests\NativeSlamRegression.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\offline\HiltiBinReader.cpp" />
+    <ClInclude Include="..\src\offline\HiltiBinReader.hpp" />
+    <ClCompile Include="..\src\offline\HiltiDatasetReader.cpp" />
+    <ClInclude Include="..\src\offline\HiltiDatasetReader.hpp" />
+    <ClCompile Include="..\src\app\offline_main.cpp" />
+    <None Include="..\src\offline\tests\HiltiOfflineRegression.cpp" />
+    <None Include="..\src\offline\README.md" />
+    <None Include="..\src\offline\tools\check_offline_static.ps1" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\app\CsvOffline.cpp" />
+    <ClInclude Include="..\src\app\CsvOffline.hpp" />
+  </ItemGroup>
+</Project>
