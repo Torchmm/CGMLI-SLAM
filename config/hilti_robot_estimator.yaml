@@ -146,7 +146,7 @@ imu_parameters:
   max_sample_gap: 0.05
 
 frontend_parameters:
-  max_num_keypoints: 150
+  max_num_keypoints: 800
   # S2 parallax and accumulated motion drive keyframes; low pixel coverage alone
   # must not evict the oldest mature anchors during a stationary interval.
   keyframe_parallax: 0.015
@@ -162,8 +162,8 @@ frontend_parameters:
   orb_scale_factor: 1.2
   orb_fast_threshold: 20
   # Shared high-threshold scans + selective low-threshold ROI fallback; false selects the ROI reference.
-  max_promotions_per_frame: 100
-  max_active_initialized: 500
+  max_promotions_per_frame: 200
+  max_active_initialized: 1000
   orb_layer_fast: true
   # Whole-layer raw FAST reference: strip scans regressed in the previous replay.
   orb_boundary_fast: false
@@ -219,8 +219,8 @@ estimator_parameters:
 
 output_parameters:
   # Master switch for feature/match/reprojection debug views; disabled for normal runs.
-  display_matches: true
-  display_overhead: true
+  display_matches: false
+  display_overhead: false
 
 # Reference only: intentionally NOT an active `lidar:` block. The current VIO
 # reader ignores this block, and the offline application reads LiDAR without fusion.

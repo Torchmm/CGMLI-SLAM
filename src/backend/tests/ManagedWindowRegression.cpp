@@ -518,8 +518,15 @@ void oldestSchurKeepsIdentityWithoutReusingEvidence() {
 void visualPoseCacheMatchesUncachedTrials() {
     Fixture f; FixedLagBackend backend; initialize(backend,f); std::string error;
     append(backend,f,1); append(backend,f,2);
-    require(backend.addLandmark(LandmarkId(1),{1,0,0},f.rho(1,0),error)
-        && backend.addObservation(LandmarkId(1),{2,1,0},error),"cache mixed-camera factor");
+    ObservationOptions anchorTime,observerTime;
+    WindowObservation anchor,observer;
+    require(backend.window().frames().observation({1,0,0},1,anchor,error)
+        && backend.window().frames().observation({2,1,0},1,observer,error),"cache fixture bearings");
+    anchorTime.bearingVelocity=anchor.bearing.cross(Eigen::Vector3d(0.12,0.04,0));
+    observerTime.bearingVelocity=observer.bearing.cross(Eigen::Vector3d(-0.08,0.05,0));
+    anchorTime.referenceTimeOffset=0.003; observerTime.referenceTimeOffset=-0.002;
+    require(backend.addLandmark(LandmarkId(1),{1,0,0},f.rho(1,0),error,anchorTime)
+        && backend.addObservation(LandmarkId(1),{2,1,0},error,observerTime),"cache mixed-camera factor");
     auto graph=backend.window().graph(); const auto observation=backend.window().landmarks().find(KeypointIdentifier{2,1,0});
     const auto& factor=graph.factors.at(observation->factorId); std::vector<const double*> bindings;
     for(auto key:factor.keys) bindings.push_back(graph.blocks.at(key).value.data());
@@ -529,8 +536,13 @@ void visualPoseCacheMatchesUncachedTrials() {
     require(cache.pairCount()==1,"One camera-pair transform is bound for the mixed-camera factor");
     const auto duplicate=cacheWindowVisualCost(*factor.cost,bindings,cache);
     require(bool(duplicate) && cache.pairCount()==1,"Repeated factors must share the same camera-pair transform");
+    require(cache.sharedTimedAnchorCount()==1,"Repeated factors share one moving anchor");
+    const BlockKey td{BlockKind::CameraTimeOffset,0};
+    const size_t tdIndex=std::find(factor.keys.begin(),factor.keys.end(),td)-factor.keys.begin();
+    require(tdIndex<factor.keys.size(),"fixture exposes camera time offset");
 
     for(int trial=0;trial<3;++trial) {
+        graph.blocks.at(td).value[0]=trial==0?0.003:0.004;
         if(trial) {
             auto& pose=graph.blocks.at(trial==1?BlockKey::pose(StateId(2)):BlockKey{BlockKind::CameraExtrinsic,0});
             Eigen::Matrix<double,6,1> step; step<<0.001,-0.002,0.003,0.002,-0.001,0.003;
@@ -557,7 +569,17 @@ void visualPoseCacheMatchesUncachedTrials() {
             debug::recordDerivative("cached_partial_"+std::to_string(trial)+"_"+std::to_string(requested),
                 (ja[requested]-jb[requested]).norm(),ja[requested].norm(),1e-10,1e-10);
         }
-
+        VisualEvaluationCache fixedCache;
+        const auto fixed=cacheWindowVisualCost(*factor.cost,bindings,fixedCache,true,true);
+        fixedCache.PrepareForEvaluation(true,true);
+        auto fixedA=pa,fixedB=pb;
+        fixedA[tdIndex]=nullptr; fixedB[tdIndex]=nullptr;
+        require(factor.cost->Evaluate(x.data(),a.data(),fixedA.data())
+            && fixed->Evaluate(x.data(),b.data(),fixedB.data()),"fixed-time compensation and basis");
+        debug::recordError("fixed_time_residual_"+std::to_string(trial),(a-b).norm(),1e-10);
+        for(size_t i=0;i<ja.size();++i) if(i!=tdIndex)
+            debug::recordDerivative("fixed_time_jacobian_"+std::to_string(trial)+"_"+std::to_string(i),
+                (ja[i]-jb[i]).norm(),ja[i].norm(),1e-10,1e-10);
     }
 }
 void cachedVisualGateMatchesReference() {

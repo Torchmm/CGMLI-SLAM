@@ -5,6 +5,7 @@
 #include <pipeline/ThreadedSlam.hpp>
 #include <factor/BodyImuFactor.hpp>
 #include <factor/ImuError.hpp>
+#include <backend/BackendFactors.hpp>
 #include <backend/FrameStore.hpp>
 #include <limits>
 #include <cameras/PinholeCamera.hpp>

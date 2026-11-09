@@ -31,6 +31,17 @@ struct VisualPairCacheValue {
     Eigen::Vector3d tca,tcb,offset;
     bool valid=false;
 };
+struct VisualTimedBearing {
+    Eigen::Vector3d direction=Eigen::Vector3d::Zero(),derivative=Eigen::Vector3d::Zero();
+    double td=0;
+    bool ready=false,derivativeReady=false;
+};
+using VisualProjection=Eigen::Matrix<double,2,3>;
+struct VisualTimedObserver {
+    VisualTimedBearing bearing;
+    VisualProjection projection=VisualProjection::Zero();
+    bool valid=false;
+};
 /// Solver-local cache. Ceres updates user parameter buffers before this callback;
 /// costs receive stable bound entries, never assume their x pointers equal user
 /// pointers. Trial points/refits refresh the same immutable worker read view.
@@ -39,8 +50,11 @@ public:
     const VisualPoseCacheValue* bind(const double* parameter);
     const VisualPairCacheValue* bindPair(const double* anchor,const double* observer,const double* extrinsic,
         const kinematics::Transformation& T_RCa,const kinematics::Transformation& T_RCb);
+    const VisualTimedBearing* bindTimedAnchor(const double* td,const Eigen::Vector3d& bearing,
+        const WindowObservation& observation,bool fixedTime);
     void PrepareForEvaluation(bool evaluateJacobians,bool newPoint) override;
-    double posePrepareMs=0,cameraPrepareMs=0,pairPrepareMs=0;
+    double posePrepareMs=0,cameraPrepareMs=0,pairPrepareMs=0,timedAnchorPrepareMs=0;
+    std::size_t sharedTimedAnchorCount() const { return sharedTimedAnchors_.size(); }
     std::size_t cameraCount() const { return cameras_.size(); }
     std::size_t pairCount() const { return pairs_.size(); }
     std::size_t refreshCount() const { return refreshCount_; }
@@ -52,12 +66,23 @@ private:
     std::map<PairKey,VisualPairCacheValue> pairs_;
     using CameraKey=std::tuple<std::uintptr_t,std::uintptr_t,std::array<double,12>>;
     std::map<CameraKey,VisualCameraCacheValue> cameras_;
+    using TimedAnchorKey=std::pair<std::uintptr_t,std::array<double,7>>;
+    struct TimedAnchorBinding {
+        const double* td=nullptr;
+        Eigen::Vector3d bearing,velocity;
+        double reference=0;
+        unsigned uses=0;
+        VisualTimedBearing value;
+    };
+    std::map<TimedAnchorKey,TimedAnchorBinding> timedAnchors_;
+    std::vector<TimedAnchorBinding*> sharedTimedAnchors_;
     const VisualCameraCacheValue* bindCamera(const double*,const double*,const kinematics::Transformation&);
     bool ready_=false,derivativesReady_=false;
     std::size_t refreshCount_=0;
 };
 std::unique_ptr<::ceres::CostFunction> cacheWindowVisualCost(const ::ceres::CostFunction&,
-    const std::vector<const double*>& parameters,VisualEvaluationCache&,bool cachePairs=true);
+    const std::vector<const double*>& parameters,VisualEvaluationCache&,bool cachePairs=true,
+    bool fixedTime=false);
 
 /// CPU reference S^2 factor used by the managed observation API. Captures measurement
 /// values and fixed rig baselines, never mutable Frame/Store pointers. Same-epoch

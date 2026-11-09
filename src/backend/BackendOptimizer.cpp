@@ -197,13 +197,16 @@ namespace cgmli {
             };
             const auto gateSetupStarted=std::chrono::steady_clock::now();
             VisualEvaluationCache gateVisualCache;
+            const auto timeBlock=graph.blocks.find({BlockKind::CameraTimeOffset,0});
+            const bool fixedCameraTime=timeBlock==graph.blocks.end() || timeBlock->second.constant;
             std::vector<std::unique_ptr<::ceres::CostFunction>> gateAdapters;
             std::vector<GateEntry> gateEntries; gateEntries.reserve(graph.factors.size());
             for(auto& item:graph.factors) if(item.second.participates()) {
                 GateEntry entry; entry.factor=&item.second; entry.parameters.reserve(item.second.keys.size());
                 for(auto key:item.second.keys) entry.parameters.push_back(graph.blocks.at(key).value.data());
                 if(item.second.kind==FactorKind::Visual) {
-                    auto cost=cacheWindowVisualCost(*item.second.cost,entry.parameters,gateVisualCache,options_.cacheVisualPairs);
+                    auto cost=cacheWindowVisualCost(*item.second.cost,entry.parameters,gateVisualCache,options_.cacheVisualPairs,
+                        fixedCameraTime);
                     if(cost) { entry.evaluationCost=cost.get(); gateAdapters.push_back(std::move(cost)); }
                 }
                 gateEntries.push_back(std::move(entry));
@@ -227,7 +230,8 @@ namespace cgmli {
                 const bool valid=statisticalGate(gateEntries,rejected,out.message,numThreads,&evaluated,admitted,&out.residualStatisticsMs);
                 const double elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-beginning).count();
                 phaseMs+=elapsed; out.gatingMs+=elapsed;
-                out.gateVisualPrepareMs=gateVisualCache.posePrepareMs+gateVisualCache.cameraPrepareMs+gateVisualCache.pairPrepareMs;
+                out.gateVisualPrepareMs=gateVisualCache.posePrepareMs+gateVisualCache.cameraPrepareMs
+                    +gateVisualCache.pairPrepareMs+gateVisualCache.timedAnchorPrepareMs;
                 return valid;
             };
             out.preNisSkipped=requested.skipPreNis;
@@ -340,7 +344,8 @@ namespace cgmli {
                             if(kind==FactorKind::Visual) {
                                 std::vector<const double*> parameters;
                                 for(auto key:item.second.keys) parameters.push_back(graph.blocks.at(key).value.data());
-                                auto cached=cacheWindowVisualCost(*evaluated,parameters,workspace->visualCache,options_.cacheVisualPairs);
+                                auto cached=cacheWindowVisualCost(*evaluated,parameters,workspace->visualCache,options_.cacheVisualPairs,
+                                    fixedCameraTime);
                                 if(cached) { evaluated=cached.get(); adapters.push_back(std::move(cached)); }
                             }
                             auto* measured=profiled(evaluated,category);
@@ -475,6 +480,8 @@ namespace cgmli {
                         out.visualPosePrepareMs=workspace->visualCache.posePrepareMs;
                         out.visualCameraPrepareMs=workspace->visualCache.cameraPrepareMs;
                         out.visualPairPrepareMs=workspace->visualCache.pairPrepareMs;
+                        out.visualTimedAnchorPrepareMs=workspace->visualCache.timedAnchorPrepareMs;
+                        out.visualSharedTimedAnchors=workspace->visualCache.sharedTimedAnchorCount();
                         out.visualCachedCameras=workspace->visualCache.cameraCount();
                         out.visualCachedPairs=workspace->visualCache.pairCount();
                         out.visualCacheRefreshes=workspace->visualCache.refreshCount();

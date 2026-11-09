@@ -4,6 +4,46 @@
 #include <chrono>
 
 namespace cgmli { namespace backend {
+namespace {
+VisualTimedBearing evaluateTimedBearing(const Eigen::Vector3d& bearing,const Eigen::Vector3d& velocity,
+    double reference,double td,bool derivative) {
+    VisualTimedBearing result;
+    result.td=td;
+    result.ready=true;
+    result.derivativeReady=derivative;
+    const double dt=reference-td;
+    if (!derivative) {
+        result.direction=timeBearing(bearing,velocity,dt);
+        return result;
+    }
+    const double speed=velocity.norm(),angle=speed*dt;
+    if (std::abs(angle)<1e-8) {
+        const Eigen::Vector3d raw=bearing+velocity*dt;
+        const double length=raw.norm();
+        result.direction=raw/length;
+        result.derivative=-(Eigen::Matrix3d::Identity()-result.direction*result.direction.transpose())*velocity/length;
+    } else {
+        const double sine=std::sin(angle),cosine=std::cos(angle);
+        result.direction=cosine*bearing+(sine/speed)*velocity;
+        result.derivative=speed*sine*bearing-cosine*velocity;
+    }
+    return result;
+}
+}
+const VisualTimedBearing* VisualEvaluationCache::bindTimedAnchor(const double* td,const Eigen::Vector3d& bearing,
+    const WindowObservation& observation,bool fixedTime) {
+    const auto& v=observation.bearingVelocity;
+    if (!bearing.allFinite() || !v.allFinite() || !std::isfinite(observation.referenceTimeOffset)) return nullptr;
+    const TimedAnchorKey key{reinterpret_cast<std::uintptr_t>(td),
+        {bearing.x(),bearing.y(),bearing.z(),v.x(),v.y(),v.z(),observation.referenceTimeOffset}};
+    auto& entry=timedAnchors_[key];
+    if (++entry.uses==1) {
+        entry.td=td; entry.bearing=bearing; entry.velocity=v; entry.reference=observation.referenceTimeOffset;
+        if (fixedTime) entry.value=evaluateTimedBearing(bearing,v,entry.reference,*td,false);
+    }
+    if (entry.uses==2 && !fixedTime) sharedTimedAnchors_.push_back(&entry);
+    return &entry.value;
+}
 const VisualPoseCacheValue* VisualEvaluationCache::bind(const double* parameter) {
     ready_=false; return &poses_.try_emplace(parameter).first->second;
 }
@@ -76,6 +116,18 @@ void VisualEvaluationCache::PrepareForEvaluation(bool evaluateJacobians,bool new
         }
         posePrepareMs+=ms(start); derivativesReady_=true;
     }
+    if (!sharedTimedAnchors_.empty()) {
+        const auto start=std::chrono::steady_clock::now();
+        for (auto* entry:sharedTimedAnchors_) {
+            const double td=*entry->td;
+            const auto& value=entry->value;
+            // Changes in pose alone leave time compensation valid. A request
+            // for derivatives at the same point may still need to promote it.
+            if (!value.ready || value.td!=td || (evaluateJacobians && !value.derivativeReady))
+                entry->value=evaluateTimedBearing(entry->bearing,entry->velocity,entry->reference,td,evaluateJacobians);
+        }
+        timedAnchorPrepareMs+=ms(start);
+    }
 }
 Eigen::Matrix<double,3,2> sphereBasis(const Eigen::Vector3d& b) {
     const Eigen::Vector3d axis=std::abs(b.x())<0.8?Eigen::Vector3d::UnitX():Eigen::Vector3d::UnitY();
@@ -94,13 +146,36 @@ kinematics::Transformation pose(const double* x) {
 class CacheableSphereCost : public ::ceres::CostFunction {
 public:
     virtual bool EvaluateCached(double const* const*,double*,double**,
-        const std::vector<const VisualPoseCacheValue*>*,const VisualPairCacheValue* = nullptr) const=0;
+        const std::vector<const VisualPoseCacheValue*>*,const VisualPairCacheValue* = nullptr,
+        const VisualTimedBearing* = nullptr,const VisualTimedObserver* = nullptr) const=0;
     virtual const VisualPairCacheValue* bindPair(const std::vector<const double*>&,VisualEvaluationCache&) const=0;
+    virtual const VisualTimedBearing* bindTimedAnchor(const std::vector<const double*>&,VisualEvaluationCache&,bool) const=0;
+    virtual std::optional<VisualTimedObserver> fixedObserver(const std::vector<const double*>&) const=0;
 };
 class InverseDepthSphereCost final : public CacheableSphereCost {
 public:
     const VisualPairCacheValue* bindPair(const std::vector<const double*>& p,VisualEvaluationCache& cache) const override {
         return observerPose_==0?nullptr:cache.bindPair(p[0],p[observerPose_],p[extrinsic_],T_RCa_,T_RCb_);
+    }
+    const VisualTimedBearing* bindTimedAnchor(const std::vector<const double*>& p,
+        VisualEvaluationCache& cache,bool fixedTime) const override {
+        return analytic_ && movingAnchor_ && timeOffset_>=0
+            ? cache.bindTimedAnchor(p[timeOffset_],anchorBearing_,anchor_,fixedTime) : nullptr;
+    }
+    std::optional<VisualTimedObserver> fixedObserver(const std::vector<const double*>& p) const override {
+        if (!analytic_ || !movingObservation_) return std::nullopt;
+        const double td=timeOffset_<0?anchor_.referenceTimeOffset:p[timeOffset_][0];
+        VisualTimedObserver value;
+        value.bearing=evaluateTimedBearing(observation_.bearing,observation_.bearingVelocity,observation_.referenceTimeOffset,td,false);
+        const auto& b=value.bearing.direction;
+        const double denominator=1+observation_.bearing.dot(b);
+        if (b.allFinite() && denominator>=1e-8) {
+            const Eigen::Matrix3d K=skew(observation_.bearing.cross(b));
+            const Eigen::Matrix3d transport=Eigen::Matrix3d::Identity()+K+K*K/denominator;
+            value.projection=measurement_*transport.transpose();
+            value.valid=value.projection.allFinite();
+        }
+        return value;
     }
     InverseDepthSphereCost(const WindowLandmark& landmark,const WindowObservation& anchor,
         const WindowObservation& observation,const kinematics::Transformation& T_RCa,
@@ -143,7 +218,8 @@ public:
         return EvaluateCached(x,residuals,jacobians,nullptr);
     }
     bool EvaluateCached(double const* const* x,double* residuals,double** jacobians,
-        const std::vector<const VisualPoseCacheValue*>* cache,const VisualPairCacheValue* pair=nullptr) const override {
+        const std::vector<const VisualPoseCacheValue*>* cache,const VisualPairCacheValue* pair=nullptr,
+        const VisualTimedBearing* anchorTime=nullptr,const VisualTimedObserver* observerTime=nullptr) const override {
         if(!analytic_) return evaluateNumerical(x,residuals,jacobians);
         if(cache) for(const auto* pose:*cache) if(pose && !pose->valid) return false;
         if(pair && !pair->valid) return false;
@@ -153,28 +229,25 @@ public:
         // current position. Derive in the LEFT tangent and lift to ambient 7D.
         const double rho=x[inverseDepth_][0],td=timeOffset_<0?anchor_.referenceTimeOffset:x[timeOffset_][0];
         if(!std::isfinite(rho) || rho<=0 || !std::isfinite(td)) return false;
-        const auto bearing=[](const Eigen::Vector3d& b,const Eigen::Vector3d& velocity,double dt,Eigen::Vector3d& derivative) {
-            const double speed=velocity.norm(),angle=speed*dt;
-            Eigen::Vector3d value;
-            if(speed==0) { derivative.setZero(); return Eigen::Vector3d(b.normalized()); }
-            if(std::abs(angle)<1e-8) {
-                const Eigen::Vector3d raw=b+velocity*dt; const double length=raw.norm();
-                value=raw/length;
-                derivative=-(Eigen::Matrix3d::Identity()-value*value.transpose())*velocity/length;
+        const bool timeDerivative=timeOffset_>=0 && jacobians && jacobians[timeOffset_];
+        const bool cachedObserver=observerTime && observerTime->bearing.td==td && !timeDerivative;
+        Eigen::Vector3d ba=anchorStatic_,bb=observationStatic_;
+        Eigen::Vector3d da=Eigen::Vector3d::Zero(),db=Eigen::Vector3d::Zero();
+        if (movingAnchor_) {
+            const auto value=anchorTime && anchorTime->ready && anchorTime->td==td && (!timeDerivative || anchorTime->derivativeReady)
+                ? *anchorTime : evaluateTimedBearing(anchorBearing_,anchor_.bearingVelocity,anchor_.referenceTimeOffset,td,timeDerivative);
+            ba=value.direction; da=value.derivative;
+        }
+        if (movingObservation_) {
+            if (cachedObserver) {
+                if (!observerTime->valid) return false;
+                bb=observerTime->bearing.direction;
             } else {
-                value=std::cos(angle)*b+(std::sin(angle)/speed)*velocity;
-                derivative=speed*std::sin(angle)*b-std::cos(angle)*velocity;
+                const auto value=evaluateTimedBearing(observation_.bearing,observation_.bearingVelocity,
+                    observation_.referenceTimeOffset,td,timeDerivative);
+                bb=value.direction; db=value.derivative;
             }
-            return value;
-        };
-        Eigen::Vector3d da,db;
-        da.setZero(); db.setZero();
-        const Eigen::Vector3d ba=!movingAnchor_?anchorStatic_:(derivatives
-            ?bearing(anchorBearing_,anchor_.bearingVelocity,anchor_.referenceTimeOffset-td,da)
-            :timeBearing(anchorBearing_,anchor_.bearingVelocity,anchor_.referenceTimeOffset-td));
-        const Eigen::Vector3d bb=!movingObservation_?observationStatic_:(derivatives
-            ?bearing(observation_.bearing,observation_.bearingVelocity,observation_.referenceTimeOffset-td,db)
-            :timeBearing(observation_.bearing,observation_.bearingVelocity,observation_.referenceTimeOffset-td));
+        }
         if(!ba.allFinite() || !bb.allFinite()) return false;
         const Eigen::Vector3d local=Rca_*(ba/rho)+tca_;
         Eigen::Matrix3d Ra,Rb,Re,W,cameraRotation;
@@ -209,7 +282,7 @@ public:
         if(!pc.allFinite() || !std::isfinite(range) || range<1e-10) return false;
         const Eigen::Vector3d n=pc/range;
         const double c=std::clamp(bb.dot(n),-1.0,1.0),s=bb.cross(n).norm();
-        const double denominator=movingObservation_?1+observation_.bearing.dot(bb):2;
+        const double denominator=movingObservation_ && !cachedObserver?1+observation_.bearing.dot(bb):2;
         if(c<-1+1e-8 || denominator<1e-8) return false;
         const Eigen::Vector3d u=n-c*bb;
         const double d=1-c;
@@ -222,8 +295,8 @@ public:
         // Shortest-arc transport R(b0 -> b). The raw measurement basis is
         // fixed, but its transport MUST also be differentiated for time offset.
         Eigen::Matrix3d K=Eigen::Matrix3d::Zero();
-        Eigen::Matrix<double,2,3> P=measurement_;
-        if(movingObservation_) {
+        VisualProjection P=cachedObserver?observerTime->projection:measurement_;
+        if(movingObservation_ && !cachedObserver) {
             K=skew(observation_.bearing.cross(bb));
             const Eigen::Matrix3d transport=Eigen::Matrix3d::Identity()+K+K*K/denominator;
             P=measurement_*transport.transpose();
@@ -274,7 +347,7 @@ public:
             Eigen::Map<Eigen::Vector2d> J(jacobians[inverseDepth_]); J=reduce*cameraRotation*(-ba/(rho*rho));
             if(!J.allFinite()) return false;
         }
-        if(timeOffset_>=0 && jacobians[timeOffset_]) {
+        if(timeDerivative) {
             if(!movingAnchor_ && !movingObservation_) {
                 Eigen::Map<Eigen::Vector2d>(jacobians[timeOffset_]).setZero(); return true;
             }
@@ -336,24 +409,32 @@ private:
 };
 class CachedSphereAdapter final : public ::ceres::CostFunction {
 public:
-    CachedSphereAdapter(const CacheableSphereCost& cost,const std::vector<const double*>& parameters,VisualEvaluationCache& cache,bool cachePairs)
+    CachedSphereAdapter(const CacheableSphereCost& cost,const std::vector<const double*>& parameters,
+        VisualEvaluationCache& cache,bool cachePairs,bool fixedTime)
         :cost_(cost) {
         *mutable_parameter_block_sizes()=cost.parameter_block_sizes(); set_num_residuals(cost.num_residuals());
         poses_.resize(parameters.size(),nullptr);
         for(size_t i=0;i<parameters.size();++i) if(parameter_block_sizes()[i]==7) poses_[i]=cache.bind(parameters[i]);
         if(cachePairs) pair_=cost.bindPair(parameters,cache);
+        anchorTime_=cost.bindTimedAnchor(parameters,cache,fixedTime);
+        if(fixedTime) observerTime_=cost.fixedObserver(parameters);
     }
-    bool Evaluate(double const* const* p,double* r,double** J) const override { return cost_.EvaluateCached(p,r,J,&poses_,pair_); }
+    bool Evaluate(double const* const* p,double* r,double** J) const override {
+        return cost_.EvaluateCached(p,r,J,&poses_,pair_,anchorTime_,observerTime_?&*observerTime_:nullptr);
+    }
 private:
     const CacheableSphereCost& cost_; std::vector<const VisualPoseCacheValue*> poses_;
     const VisualPairCacheValue* pair_=nullptr;
+    const VisualTimedBearing* anchorTime_=nullptr;
+    std::optional<VisualTimedObserver> observerTime_;
 };
 }
 std::unique_ptr<::ceres::CostFunction> cacheWindowVisualCost(const ::ceres::CostFunction& cost,
-    const std::vector<const double*>& parameters,VisualEvaluationCache& cache,bool cachePairs) {
+    const std::vector<const double*>& parameters,VisualEvaluationCache& cache,bool cachePairs,
+    bool fixedTime) {
     const auto* sphere=dynamic_cast<const CacheableSphereCost*>(&cost);
     if(!sphere || parameters.size()!=cost.parameter_block_sizes().size()) return {};
-    return std::make_unique<CachedSphereAdapter>(*sphere,parameters,cache,cachePairs);
+    return std::make_unique<CachedSphereAdapter>(*sphere,parameters,cache,cachePairs,fixedTime);
 }
 bool makeWindowVisualFactor(const WindowLandmark& landmark,const WindowObservation& anchor,
     const WindowObservation& observation,const FrameStore& frames,const BackendGraph& graph,

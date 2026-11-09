@@ -931,6 +931,8 @@ namespace cgmli {
                     <<" jacobian_evaluations="<<step.solve.jacobianEvaluations<<" residual_evaluations="<<step.solve.residualEvaluations
                     <<" visual_pose_prepare_ms="<<step.solve.visualPosePrepareMs<<" visual_camera_prepare_ms="<<step.solve.visualCameraPrepareMs
                     <<" visual_pair_prepare_ms="<<step.solve.visualPairPrepareMs<<" gate_visual_prepare_ms="<<step.solve.gateVisualPrepareMs
+                    <<" visual_timed_anchor_prepare_ms="<<step.solve.visualTimedAnchorPrepareMs
+                    <<" visual_shared_timed_anchors="<<step.solve.visualSharedTimedAnchors
                     <<" visual_cached_cameras="<<step.solve.visualCachedCameras
                     <<" visual_cached_pairs="<<step.solve.visualCachedPairs<<" visual_cache_refreshes="<<step.solve.visualCacheRefreshes
                     <<" line_search_cost_ms="<<step.solve.lineSearchCostMs<<" line_search_gradient_ms="<<step.solve.lineSearchGradientMs

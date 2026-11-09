@@ -231,6 +231,8 @@ struct SolveReport {
     bool ceresTimeBudgetReached=false; // May exceed the allowance at an iteration boundary or minimum.
     double gateSetupMs=0,gateVisualPrepareMs=0;
     double visualPosePrepareMs=0,visualCameraPrepareMs=0,visualPairPrepareMs=0;
+    double visualTimedAnchorPrepareMs=0;
+    size_t visualSharedTimedAnchors=0;
     size_t visualCachedCameras=0;
     double validationMs=0,checkpointMs=0;
     double linearSolverMs=0,jacobianMs=0,residualMs=0;
