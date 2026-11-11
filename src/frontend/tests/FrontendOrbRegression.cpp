@@ -16,6 +16,10 @@
 #include <thread>
 #include <cstring>
 #include <opencv2/imgproc.hpp>
+#ifdef CGMLI_ENABLE_CUDA_ORB
+#include <visual/features/OrbMatchCuda.hpp>
+#include <cuda_runtime_api.h>
+#endif
 
 using namespace cgmli;
 using namespace cgmli::features;
@@ -24,7 +28,7 @@ void require(bool condition,const char* message) { if(!condition) throw std::run
 template<class F> void throws(F operation,const char* message) {
     bool failed=false; try { operation(); } catch(const std::exception&) { failed=true; } require(failed,message);
 }
-void sparseGuidedMatchingEquivalence() {
+void sparseGuidedMatchingEquivalence(cgmli::features::detail::OrbCudaMatcherSession* cuda=nullptr) {
     auto camera=std::make_shared<cameras::PinholeCamera<cameras::NoDistortion>>(
         128,128,70,70,64,64,cameras::NoDistortion());
     cv::Mat queryStorage(24,35,CV_8UC1),trainStorage(64,37,CV_8UC1);
@@ -35,6 +39,7 @@ void sparseGuidedMatchingEquivalence() {
     for(int i=0;i<24;++i) q.emplace_back(float(10+(i%6)*20),float(10+(i/6)*20),31);
     for(int j=0;j<64;++j) t.push_back(j<24?q[j]:cv::KeyPoint(float((j*19)%127),float((j*31)%127),31));
     OrbMatchGuidance guidance; guidance.queryCamera=camera; guidance.trainCamera=camera;
+    guidance.cudaSession=cuda;
     guidance.useSphericalGeometry=false; guidance.searchRadiusPixels=12;
     guidance.queryEnabled.resize(q.size()); guidance.trainEnabled.resize(t.size());
     for(size_t i=0;i<q.size();++i) { guidance.queryEnabled[i]=i%11!=0; guidance.predictedTrainPixels.push_back(q[i].pt); }
@@ -61,6 +66,7 @@ void sparseGuidedMatchingEquivalence() {
         matcher.matchFiltered(query,train,expected,permitted);
         matcher.matchGuided(query,train,q,t,guidance,actual,&statistics);
         equal(expected,actual);
+        if(cuda) require(statistics.usedCuda,"CUDA pixel/mask match was not exercised");
         if(combinations) combinations<<mutual<<','<<reverseRatio<<','<<single<<','<<expected.size()<<','<<actual.size()
             <<','<<statistics.candidatePairs<<','<<statistics.descriptorComparisons<<'\n';
         if(mutual && reverseRatio) {
@@ -298,7 +304,7 @@ void startupCameraPreparation() {
     prepared.clear(); options.virtualFocalLength=100; prepared.setOptions(options);
     prepared.prepare(calibration,false);
 }
-void groupedMapNeighborsAndPreparedLayouts() {
+void groupedMapNeighborsAndPreparedLayouts(cgmli::features::detail::OrbCudaMatcherSession* cuda=nullptr) {
     auto camera=std::make_shared<cameras::PinholeCamera<cameras::NoDistortion>>(
         128,128,70,70,64,64,cameras::NoDistortion());
     cv::Mat query(4,32,CV_8UC1,cv::Scalar(0)),train(2,32,CV_8UC1,cv::Scalar(0));
@@ -308,6 +314,7 @@ void groupedMapNeighborsAndPreparedLayouts() {
     t.emplace_back(55,55,31); t.emplace_back(60,60,31);
     OrbMatcherOptions options; options.maxOctaveDifference=-1; OrbMatcher matcher(options);
     OrbMatchGuidance guidance; guidance.useSphericalGeometry=false;
+    guidance.cudaSession=cuda;
     guidance.queryCamera=camera; guidance.trainCamera=camera;
     std::vector<cv::DMatch> ordinary,grouped,cached;
     matcher.matchGuided(query,train,q,t,guidance,ordinary);
@@ -321,7 +328,9 @@ void groupedMapNeighborsAndPreparedLayouts() {
     for(int i=0;i<2;++i) std::memcpy(tw[i].data(),train.ptr(i),32);
     auto index=OrbMatcher::prepareTrainIndex(t,camera.get(),guidance.searchRadiusPixels);
     guidance.queryWords=&qw; guidance.trainWords=&tw; guidance.trainIndex=&index;
-    matcher.matchGuided(query,train,q,t,guidance,cached);
+    OrbMatchStatistics statistics;
+    matcher.matchGuided(query,train,q,t,guidance,cached,&statistics);
+    if(cuda) require(statistics.usedCuda,"CUDA grouped identity match was not exercised");
     require(cached.size()==grouped.size(),"Prepared index changed map matches");
     for(size_t i=0;i<cached.size();++i) require(cached[i].queryIdx==grouped[i].queryIdx
         && cached[i].trainIdx==grouped[i].trainIdx && cached[i].distance==grouped[i].distance,"Prepared words/index changed exact result");
@@ -366,18 +375,20 @@ void filteredTrainBucketsPreserveNeighbors() {
         require(index.grid==originalGrid && index.octaves==originalOctaves,"A job must not mutate the shared training index");
     }
 }
-void existingIdentityWinsBeforeNewTexture() {
+void existingIdentityWinsBeforeNewTexture(cgmli::features::detail::OrbCudaMatcherSession* cuda=nullptr) {
     cv::Mat query(3,32,CV_8UC1,cv::Scalar(0)),train(2,32,CV_8UC1,cv::Scalar(0));
     query.at<uchar>(0,0)=1; query.at<uchar>(1,0)=15; train.row(1).setTo(255);
     const std::vector<cv::KeyPoint> q{cv::KeyPoint(10,10,31),cv::KeyPoint(20,10,31),cv::KeyPoint(30,10,31)};
     const std::vector<cv::KeyPoint> t{cv::KeyPoint(10,10,31),cv::KeyPoint(40,10,31)};
     OrbMatchGuidance guidance; guidance.useSphericalGeometry=false;
+    guidance.cudaSession=cuda;
     OrbMatcherOptions options; OrbMatcher matcher(options);
     std::vector<cv::DMatch> ordinary,retained; OrbMatchStatistics baseline,prioritized;
     matcher.matchGuided(query,train,q,t,guidance,ordinary,&baseline);
     require(ordinary.size()==1 && ordinary[0].queryIdx==2,"unowned exact lookalike must expose the ordinary reciprocal competition");
     const std::vector<uint8_t> ownership{1,1,0}; guidance.queryPriorities=&ownership;
     matcher.matchGuided(query,train,q,t,guidance,retained,&prioritized);
+    if(cuda) require(prioritized.usedCuda,"CUDA ownership-aware reverse test was not exercised");
     require(retained.size()==1 && retained[0].queryIdx==0 && retained[0].trainIdx==0,
         "established seed with distinct reciprocal neighbor must survive new texture competition");
     require(prioritized.descriptorComparisons==baseline.descriptorComparisons && prioritized.ownedMatches==1
@@ -407,6 +418,56 @@ void parallelCameraInitialization() {
     auto otherRig=mixedRig(); MultiFrame changed(otherRig,Time(2,0),2); changed.setImage(0,texture());
     throws([&]{frontend.detectAndDescribe(0,changed,kinematics::Transformation());},"model identity cannot silently change within a session");
 }
+#ifdef CGMLI_ENABLE_CUDA_ORB
+void cudaGuidedMatchingParity() {
+    using namespace cgmli::features::detail;
+    OrbCudaMatcherSession cuda;
+    sparseGuidedMatchingEquivalence(&cuda);
+    cuda.beginProposal();
+    groupedMapNeighborsAndPreparedLayouts(&cuda);
+    cuda.beginProposal();
+    existingIdentityWinsBeforeNewTexture(&cuda);
+    std::vector<CudaOrbWords> query(2),train(2);
+    query[1][0]=train[1][0]=1;
+    OrbCudaMatchInput input;
+    input.queryWords=&query; input.trainWords=&train; input.cacheQuery=input.cacheTrain=true;
+    input.groups=2; input.queries.resize(2); input.train.resize(2); input.octaveEntries={0,1};
+    for(int i=0;i<2;++i) { input.queries[i].group=i; input.queries[i].last=2; }
+    OrbCudaMatchOutput output;
+    cuda.beginProposal();
+    require(cuda.match(input,output) && output.forward[0].index[0]==0,"first resident descriptor upload");
+    auto copiedQuery=query; input.queryWords=&copiedQuery;
+    cuda.beginProposal();
+    require(cuda.match(input,output) && output.forward[0].index[0]==0,"same descriptors in a new proposal");
+    copiedQuery[0][0]=1;
+    cuda.beginProposal();
+    require(cuda.match(input,output) && output.forward[0].index[0]==1,"changed descriptors cannot reuse stale device rows");
+
+    struct alignas(8) DeviceRow { std::uint64_t padding=0; CudaOrbWords words{}; };
+    std::array<DeviceRow,2> rows{};
+    rows[1].words=copiedQuery[0];
+    DeviceRow* device=nullptr;
+    require(cudaMalloc(reinterpret_cast<void**>(&device),sizeof(rows))==cudaSuccess,"device descriptor rows");
+    const std::shared_ptr<DeviceRow> storage(device,[](DeviceRow* p) { cudaFree(p); });
+    int* index=nullptr;
+    require(cudaMalloc(reinterpret_cast<void**>(&index),sizeof(int))==cudaSuccess,"device descriptor index");
+    const std::shared_ptr<const int> indices(index,[](const int* p) { cudaFree(const_cast<int*>(p)); });
+    const int selected=1;
+    require(cudaMemcpy(device,rows.data(),sizeof(rows),cudaMemcpyHostToDevice)==cudaSuccess &&
+        cudaMemcpy(index,&selected,sizeof(selected),cudaMemcpyHostToDevice)==cudaSuccess,"upload strided descriptor test");
+    int currentDevice=-1;
+    require(cudaGetDevice(&currentDevice)==cudaSuccess,"current CUDA device");
+    input.deviceQuery=std::make_shared<OrbCudaDescriptorRows>(OrbCudaDescriptorRows{
+        std::shared_ptr<const unsigned char>(storage,reinterpret_cast<const unsigned char*>(device)+offsetof(DeviceRow,words)),
+        indices,1,sizeof(DeviceRow),currentDevice});
+    input.queries.resize(1);
+    input.groups=1;
+    std::vector<CudaOrbWords> staleHost(1);
+    input.queryWords=&staleHost;
+    require(cuda.match(input,output) && output.residentDescriptorSets==1 &&
+        output.forward[0].index[0]==1,"match the selected device row through a compact index");
+}
+#endif
 }
 #ifdef CGMLI_EMBED_MODULE_TESTS
 void cgmli::debug::registerOrbCases(std::vector<cgmli::debug::ModuleCase>& cases) {
@@ -419,10 +480,19 @@ void cgmli::debug::registerOrbCases(std::vector<cgmli::debug::ModuleCase>& cases
     cases.push_back({"matching","hammingAndRowLayout",[]() { hammingAndRowLayout(); }});
     cases.push_back({"matching","groupedMapNeighborsAndPreparedLayouts",[]() { groupedMapNeighborsAndPreparedLayouts(); }});
     cases.push_back({"matching","filteredTrainBucketsPreserveNeighbors",[]() { filteredTrainBucketsPreserveNeighbors(); }});
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    int devices=0;
+    if(cudaGetDeviceCount(&devices)==cudaSuccess && devices)
+        cases.push_back({"matching","cudaGuidedMatchingParity",[]() { cudaGuidedMatchingParity(); }});
+#endif
 }
 #else
 int main() {
     try { deferredRigOverlaps(); existingIdentityWinsBeforeNewTexture(); sparseGuidedMatchingEquivalence(); hammingAndRowLayout(); mixedCamerasReuseAndProfiles(); startupCameraPreparation(); groupedMapNeighborsAndPreparedLayouts(); filteredTrainBucketsPreserveNeighbors(); parallelCameraInitialization();
+#ifdef CGMLI_ENABLE_CUDA_ORB
+        int devices=0;
+        if(cudaGetDeviceCount(&devices)==cudaSuccess && devices) cudaGuidedMatchingParity();
+#endif
         std::cout<<"frontend ORB regression passed\n"; return 0;
     } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

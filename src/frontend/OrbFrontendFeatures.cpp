@@ -1,6 +1,7 @@
 #include <frontend/OrbFrontendFeatures.hpp>
 #include <visual/MultiFrame.hpp>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -62,6 +63,13 @@ double OrbFrontendFeatures::initialiseExtractor(size_t camera,const MultiFrame& 
     if(frame.numFrames()!=extractors_.size() || camera>=extractors_.size() || !frame.geometry(camera))
         throw std::invalid_argument("Frontend frame does not match configured camera count/geometry");
     auto options=options_;
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    static const bool useCuda=[] {
+        const char* backend=std::getenv("CGMLI_ORB_BACKEND");
+        return !backend || std::strcmp(backend,"cpu")!=0;
+    }();
+    options.useCuda=useCuda;
+#endif
     if(!std::isfinite(options.virtualFocalLength) || options.virtualFocalLength<0)
         throw std::invalid_argument("Invalid ORB reference focal length");
     if(options.descriptorMode==OrbExtractorOptions::DescriptorMode::GravityCameraAware)
@@ -102,6 +110,7 @@ void OrbFrontendFeatures::prepare(const MultiFrame& calibration,bool parallel) {
         extractors_[camera]->prepareStaticCaches();
         const double masksMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-masksStarted).count();
         LOG(INFO)<<"[Timing][OrbPrepare] camera="<<camera<<" geometry_ms="<<geometryMs<<" masks_ms="<<masksMs
+            <<" backend="<<(extractors_[camera]->cudaReady()?"cuda":"cpu")
             <<" layer_fast="<<options_.layerFast<<" boundary_fast="<<options_.boundaryFast
             <<" adaptive_geometry="<<options_.adaptiveGeometryCandidates<<" grouped_balancing="<<options_.groupedBalancing
             <<" total_ms="<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-cameraStarted).count();
@@ -135,6 +144,7 @@ bool OrbFrontendFeatures::detectAndDescribe(size_t camera, MultiFrame& frame,
     extractor->detectAndCompute(frame.image(camera),cv::noArray(),points,descriptors,supplied!=nullptr);
     frame.setDetector(camera,extractor); frame.setExtractor(camera,extractor);
     frame.resetKeypoints(camera,points); frame.resetDescriptors(camera,descriptors);
+    frame.setCudaDescriptorRows(camera,extractor->cudaDescriptorRows());
     frame.setDescriptorProfile(camera,profile(*extractor));
     frame.computeBackProjections(camera);
     validateDescriptors(frame,camera);
@@ -143,7 +153,13 @@ bool OrbFrontendFeatures::detectAndDescribe(size_t camera, MultiFrame& frame,
     if(VLOG_IS_ON(1) || firstExtraction || cold || totalMs>200 || frame.id()%30==0) {
         const auto& timing=extractor->lastTiming();
         LOG(INFO)<<"[Timing][Extract] frame="<<frame.id()<<" camera="<<camera<<" cold_ms="<<initializationMs
+            <<" backend="<<(timing.usedCuda?"cuda":"cpu")
+            <<" device_descriptor_rows="<<(frame.cudaDescriptorRows(camera)?descriptors.rows:0)
             <<" pyramid_ms="<<timing.pyramidMs<<" detect_ms="<<timing.detectionMs<<" describe_ms="<<timing.descriptorMs
+            <<" gpu_upload_ms="<<timing.gpuUploadMs<<" gpu_pyramid_ms="<<timing.gpuPyramidMs
+            <<" gpu_fast_ms="<<timing.gpuFastMs<<" gpu_corners_download_ms="<<timing.gpuCornersDownloadMs
+            <<" gpu_integral_ms="<<timing.gpuIntegralMs<<" gpu_descriptor_ms="<<timing.gpuDescriptorMs
+            <<" gpu_descriptors_download_ms="<<timing.gpuDescriptorsDownloadMs
             <<" fast_ms="<<timing.fastMs<<" candidate_sort_ms="<<timing.candidateSortMs
             <<" fast_raw_scan_ms="<<timing.fastRawScanMs<<" fast_nms_scan_ms="<<timing.fastNmsScanMs
             <<" fast_boundary_ms="<<timing.fastBoundaryMs<<" fast_bucket_ms="<<timing.fastBucketMs

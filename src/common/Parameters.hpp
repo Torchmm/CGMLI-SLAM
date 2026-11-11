@@ -11,6 +11,7 @@
 #include <cameras/NCameraSystem.hpp>
 #include <kinematics/Transformation.hpp>
 #include <optional>
+#include <string>
 
 /// \brief cgmli Main namespace of this package.
 namespace cgmli {
@@ -119,6 +120,8 @@ struct FrontendParameters {
   bool pose_analytic_absolute_jacobians = true;
   bool pose_adaptive_ransac = true; ///< Healthy tracking floor 20, periodic/recovery floor remains 50.
   bool orb_staged_matching = true; ///< Map-first matching with coverage/motion and pose-consensus fallbacks.
+  bool orb_cuda_matcher = false; ///< Use CUDA for guided temporal and map matching when available.
+  bool orb_cuda_early_integral = true; ///< Overlap CUDA integral images with CPU keypoint selection.
   bool require_keyframe_anchor_for_promotion = true; ///< Keep non-keyframe tracks as seeds until a stable reference is available.
   int max_tracking_seeds = 1000; ///< Independent admission budget; zero disables.
   double seed_max_untracked_seconds = 0.5; ///< Last-observation age before unused seeds expire; zero disables.
@@ -136,12 +139,16 @@ struct EstimatorParameters {
   int backend_max_retries = 1;
   double visual_nis_threshold = 9.210340371976184; ///< Squared whitened 2D bearing residual.
   bool skip_pre_nis_when_tracking_healthy = true;
+  bool lightweight_non_keyframes = false; ///< Refine the two newest VIO epochs before removing the penultimate frame.
+  bool lightweight_new_imu_nis_gate = false; ///< Gate the newest IMU edge after a lightweight solve.
+  int max_consecutive_lightweight_frames = 4; ///< Zero prevents lightweight solves.
   bool parallel_marginalization_accumulation = true;
     double max_imu_interval_seconds = 10.0;
     bool incremental_imu = true;
     bool preserve_oldest_visual_information = true;
     bool backend_dense_schur = false; ///< Controlled alternative for the small pose/SB separator.
     bool cache_visual_pairs = true; ///< Solver-local camera-pair geometry cache, refreshed at every new point.
+    std::string backend_visual_batch = "cpu"; ///< CPU, CUDA, hybrid, Schur, or audit path for visual optimization.
   double max_visual_imu_rotation_error = 0.2; ///< Relative orientation error [rad].
   double max_visual_imu_position_error = 0.5; ///< Position error allowance [m].
   double max_visual_imu_position_error_rate = 2.0; ///< Additional allowance per elapsed second [m/s].

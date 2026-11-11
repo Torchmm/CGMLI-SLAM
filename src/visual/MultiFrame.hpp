@@ -185,6 +185,10 @@ class MultiFrame
   inline const cv::Mat & descriptors(size_t cameraIdx) const {
       return frames_.at(cameraIdx).descriptors();
   }
+  const auto& cudaDescriptorRows(size_t cameraIdx) const { return frames_.at(cameraIdx).cudaDescriptorRows(); }
+  void setCudaDescriptorRows(size_t cameraIdx,std::shared_ptr<const features::detail::OrbCudaDescriptorRows> rows) {
+      frames_.at(cameraIdx).setCudaDescriptorRows(std::move(rows));
+  }
   const std::string& descriptorProfile(size_t cameraIdx) const {
       return frames_.at(cameraIdx).descriptorProfile();
   }

@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <opencv2/core.hpp>
@@ -96,6 +97,7 @@ private:
     ReadLimits limits_;
     std::vector<std::filesystem::path> files_;
     std::vector<std::ifstream> inputs_;
+    std::mutex inputMutex_; // Protect seek/read, including legacy combined recordings.
     std::vector<uint64_t> fileSizes_;
     std::vector<std::string> fileTopics_;
     IndexStatistics statistics_;

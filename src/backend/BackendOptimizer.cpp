@@ -1,6 +1,9 @@
 #include "BackendOptimizer.hpp"
 #include "BackendProblem.hpp"
+#include "VisualBatchAudit.hpp"
+#include <Eigen/Cholesky>
 #include <Eigen/Eigenvalues>
+#include <Eigen/SparseCore>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -10,7 +13,307 @@
 
 namespace cgmli {
     namespace backend {
-        BackendOptimizer::BackendOptimizer(const BackendOptions& o) : options_(o), marginalizer_(o) { options_.validate(); }
+#ifdef CGMLI_ENABLE_CUDA_ORB
+        namespace {
+            struct OnlineSchurTiming {
+                double cpuNormalMs=0,gpuLaunchMs=0,gpuReduceWaitMs=0,cpuLinearMs=0,cpuBackSubMs=0,trialMs=0;
+            };
+            // Only scalar landmarks that appear exclusively in supported visual
+            // factors can be eliminated independently. The retained IMU, FEJ
+            // prior, and calibration terms keep their original Ceres costs.
+            bool solveVisualSchur(BackendGraph& graph,detail::SolveWorkspace& workspace,double huberScale,
+                int maxIterations,int minIterations,int threads,double seconds,
+                ::ceres::Solver::Summary& result,OnlineSchurTiming& timing,std::string& reason) {
+                auto& problem=*workspace.problem;
+                auto& cache=workspace.visualCache;
+                if(!workspace.schur || !cache.batchFactors()) { reason="no independent visual Schur partition"; return false; }
+                struct Variable {
+                    ParameterBlock* block;
+                    const ::ceres::Manifold* manifold;
+                    int column,width,offset,lift;
+                };
+                std::map<BlockKey,Variable> variables;
+                std::vector<BlockKey> pointKeys;
+                std::vector<double> lifts;
+                int retained=0,dimension=0,ambient=0;
+                ::ceres::Problem::EvaluateOptions cpuOptions;
+                cpuOptions.num_threads=threads;
+                const auto bind=[&](BlockKey key,bool point) {
+                    auto& block=graph.blocks.at(key);
+                    const auto* manifold=problem.GetManifold(block.value.data());
+                    const int size=int(block.value.size()),width=problem.ParameterBlockTangentSize(block.value.data());
+                    if(width<=0 || (point && (size!=1 || manifold)) ||
+                        ((block.lower.size() || block.upper.size()) && (size!=1 || manifold))) return false;
+                    variables.emplace(key,Variable{&block,manifold,dimension,width,ambient,int(lifts.size())});
+                    lifts.resize(lifts.size()+size*width,0);
+                    dimension+=width;
+                    ambient+=size;
+                    return true;
+                };
+                for(auto key:workspace.used) {
+                    auto& block=graph.blocks.at(key);
+                    if(block.constant) continue;
+                    if(key.kind==BlockKind::Landmark) pointKeys.push_back(key);
+                    else {
+                        if(!bind(key,false)) { reason="unsupported retained manifold bounds"; return false; }
+                        cpuOptions.parameter_blocks.push_back(block.value.data());
+                    }
+                }
+                retained=dimension;
+                for(auto key:pointKeys) if(!bind(key,true)) { reason="non-scalar landmark"; return false; }
+                if(retained<=0 || pointKeys.empty() || retained>512 || dimension>4000) {
+                    reason="unsupported Schur dimensions"; return false;
+                }
+                const auto retainsOnly=[&](const auto& keys) {
+                    for(auto key:keys) if(key.kind==BlockKind::Landmark && variables.count(key)) return false;
+                    return true;
+                };
+                if(workspace.priorResidual) {
+                    if(!retainsOnly(graph.prior->keys())) { reason="prior contains a free landmark"; return false; }
+                    cpuOptions.residual_blocks.push_back(workspace.priorResidual);
+                }
+                std::vector<detail::DirectVisualLayout> layout;
+                layout.reserve(cache.batchFactors());
+                for(const auto& entry:workspace.residuals) {
+                    const auto& f=graph.factors.at(entry.first);
+                    if(f.kind!=FactorKind::Visual) {
+                        if(!retainsOnly(f.keys)) { reason="nonvisual factor contains a free landmark"; return false; }
+                        cpuOptions.residual_blocks.push_back(entry.second);
+                        continue;
+                    }
+                    if(f.keys.size()>5) { reason="unsupported visual parameter layout"; return false; }
+                    detail::DirectVisualLayout row;
+                    if(f.loss) {
+                        double rho[3];
+                        if(!dynamic_cast<const ::ceres::HuberLoss*>(f.loss.get()) || huberScale<=0) {
+                            reason="unsupported visual loss"; return false;
+                        }
+                        f.loss->Evaluate(4*huberScale*huberScale,rho);
+                        if(std::abs(rho[1]-0.5)>1e-12) { reason="different visual Huber scale"; return false; }
+                        row.huberScale=huberScale;
+                    }
+                    for(size_t b=0;b<f.keys.size();++b) {
+                        const auto variable=variables.find(f.keys[b]);
+                        if(variable==variables.end()) continue;
+                        const auto& v=variable->second;
+                        row.column[b]=v.column; row.width[b]=v.width; row.plus[b]=v.lift;
+                    }
+                    layout.push_back(row);
+                }
+                if(layout.size()!=cache.batchFactors()) { reason="visual factor outside CUDA batch"; return false; }
+
+                struct TrialState {
+                    VisualEvaluationCache& cache;
+                    const std::map<BlockKey,Variable>& variables;
+                    std::vector<double> original;
+                    bool keep=false;
+                    void write(const std::vector<double>& values) const {
+                        for(const auto& entry:variables) {
+                            const auto& v=entry.second;
+                            std::copy_n(values.data()+v.offset,v.block->value.size(),v.block->value.data());
+                        }
+                    }
+                    ~TrialState() { if(!keep) write(original); cache.setBatchMode(VisualBatchMode::Schur); }
+                } trial{cache,variables,std::vector<double>(ambient)};
+                for(const auto& entry:variables) {
+                    const auto& v=entry.second;
+                    std::copy_n(v.block->value.data(),v.block->value.size(),trial.original.data()+v.offset);
+                }
+                auto accepted=trial.original;
+                std::vector<double> candidate(ambient),lower(pointKeys.size()),upper(pointKeys.size());
+                Eigen::VectorXd ranges(pointKeys.size());
+                const auto lowerBound=[](const ParameterBlock& p) { return p.lower.size()?p.lower[0]:-std::numeric_limits<double>::infinity(); };
+                const auto upperBound=[](const ParameterBlock& p) { return p.upper.size()?p.upper[0]:std::numeric_limits<double>::infinity(); };
+                // Evaluate only retained nonvisual terms for the linearization.
+                // Trial cost uses the same CPU costs and losses as Ceres.
+                cache.setBatchMode(VisualBatchMode::Reference);
+                ::ceres::Problem::EvaluateOptions trialOptions;
+                trialOptions.num_threads=threads;
+                using Sparse=Eigen::SparseMatrix<double,Eigen::RowMajor,int>;
+                using RowMatrix=Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor>;
+                ::ceres::CRSMatrix cpuJacobian;
+                std::vector<double> cpuResiduals;
+                Eigen::MatrixXd cpuH(retained,retained);
+                Eigen::VectorXd cpuG(retained);
+                ::ceres::Solver::Summary summary;
+                summary.linear_solver_type_used=::ceres::DENSE_SCHUR;
+                const auto started=std::chrono::steady_clock::now();
+                const auto elapsed=[](auto start) { return std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count(); };
+                double lambda=1e-4,increase=2,cost=0,cpuCost=0;
+                int acceptedSteps=0;
+                bool newTopology=true,newPoint=true,converged=false;
+                detail::VisualCudaBatch* gpu=nullptr;
+                summary.num_jacobian_evaluations=0;
+                summary.num_residual_evaluations=0;
+                summary.jacobian_evaluation_time_in_seconds=0;
+                summary.residual_evaluation_time_in_seconds=0;
+                summary.linear_solver_time_in_seconds=0;
+                for(int i=0;i<maxIterations;++i) {
+                    if(i>=minIterations && i>0 && elapsed(started)>=seconds) break;
+                    const auto linearStarted=std::chrono::steady_clock::now();
+                    bool cpuValid=true;
+                    if(newPoint) {
+                        for(const auto& entry:variables) {
+                            const auto& v=entry.second;
+                            if(v.manifold) {
+                                if(!v.manifold->PlusJacobian(v.block->value.data(),lifts.data()+v.lift)) {
+                                    reason="invalid manifold lift"; return false;
+                                }
+                            } else for(int j=0;j<v.width;++j) lifts[v.lift+j*v.width+j]=1;
+                        }
+                        for(size_t k=0;k<pointKeys.size();++k) {
+                            const auto& p=*variables.at(pointKeys[k]).block;
+                            lower[k]=lowerBound(p)-p.value[0]; upper[k]=upperBound(p)-p.value[0];
+                        }
+                        const auto launchStarted=std::chrono::steady_clock::now();
+                        gpu=cache.linearizeSchur(layout,lifts,retained,int(pointKeys.size()),newTopology);
+                        timing.gpuLaunchMs+=1000*elapsed(launchStarted);
+                        if(!gpu) { reason="CUDA normal assembly failed"; return false; }
+                        newTopology=false;
+                        // Overlap retained IMU/prior linearization with GPU visual assembly.
+                        const auto cpuStarted=std::chrono::steady_clock::now();
+                        cpuH.setZero(); cpuG.setZero(); cpuCost=0;
+                        if(!cpuOptions.residual_blocks.empty()) {
+                            cpuValid=problem.Evaluate(cpuOptions,&cpuCost,&cpuResiduals,nullptr,&cpuJacobian) &&
+                                cpuJacobian.num_cols==retained;
+                            if(cpuValid) {
+                                const Eigen::Map<const Sparse> J(cpuJacobian.num_rows,cpuJacobian.num_cols,
+                                    int(cpuJacobian.values.size()),cpuJacobian.rows.data(),cpuJacobian.cols.data(),cpuJacobian.values.data());
+                                cpuH=Eigen::MatrixXd(J.transpose()*J);
+                                cpuG=J.transpose()*Eigen::Map<const Eigen::VectorXd>(cpuResiduals.data(),cpuResiduals.size());
+                            }
+                        }
+                        timing.cpuNormalMs+=1000*elapsed(cpuStarted);
+                        ++summary.num_jacobian_evaluations;
+                    }
+                    detail::VisualReducedSystem system;
+                    const auto reduceStarted=std::chrono::steady_clock::now();
+                    const bool reduced=gpu->reduceOnline(lambda,system);
+                    timing.gpuReduceWaitMs+=1000*elapsed(reduceStarted);
+                    if(!cpuValid || !reduced) { reason=cpuValid?"CUDA Schur reduction failed":"retained factor evaluation failed"; return false; }
+                    if(newPoint) {
+                        const double linearizedCost=system.cost+cpuCost;
+                        if(!std::isfinite(linearizedCost) ||
+                            (i>0 && std::abs(linearizedCost-cost)>1e-8*std::max(1.0,cost))) {
+                            reason="joint cost disagrees with accepted trial"; return false;
+                        }
+                        if(i==0) summary.initial_cost=cost=linearizedCost;
+                        summary.jacobian_evaluation_time_in_seconds+=elapsed(linearStarted);
+                    }
+                    if(i>=minIterations && acceptedSteps>0 && elapsed(started)>=seconds) break;
+                    const auto solveStarted=std::chrono::steady_clock::now();
+                    Eigen::MatrixXd H=Eigen::Map<const RowMatrix>(system.H,retained,retained).selfadjointView<Eigen::Upper>();
+                    H+=cpuH;
+                    const Eigen::VectorXd g=cpuG+Eigen::Map<const Eigen::VectorXd>(system.g,retained);
+                    const Eigen::VectorXd diagonal=cpuH.diagonal()+Eigen::Map<const Eigen::VectorXd>(system.diagonal,retained);
+                    const Eigen::VectorXd damping=lambda*diagonal.array().max(1e-6);
+                    H.diagonal()+=damping;
+                    if(!H.allFinite() || !g.allFinite() || !std::isfinite(cost)) {
+                        reason="nonfinite joint normal system"; return false;
+                    }
+                    Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
+                    if(ldlt.info()!=Eigen::Success || ldlt.vectorD().minCoeff()<=0) {
+                        reason="joint reduced system is not positive definite"; return false;
+                    }
+                    Eigen::VectorXd delta=ldlt.solve(-g);
+                    if(!delta.allFinite()) { reason="invalid reduced state step"; return false; }
+                    for(const auto& entry:variables) {
+                        const auto& v=entry.second;
+                        if(v.column>=retained) continue;
+                        const auto& p=*v.block;
+                        if(p.lower.size() || p.upper.size()) {
+                            const double x=accepted[v.offset];
+                            delta[v.column]=std::clamp(x+delta[v.column],lowerBound(p),upperBound(p))-x;
+                        }
+                    }
+                    const auto backSubStarted=std::chrono::steady_clock::now();
+                    timing.cpuLinearMs+=1000*elapsed(solveStarted);
+                    // The compressed point blocks arrive with the reduced
+                    // matrix. Recover bounded point steps without another
+                    // GPU synchronization. Restore the eliminated terms in
+                    // the predicted change of the undamped joint model.
+                    double predicted=-delta.dot(g+0.5*(H*delta-damping.cwiseProduct(delta)));
+                    for(Eigen::Index k=0;k<ranges.size();++k) {
+                        double cross=0;
+                        for(int j=system.rangeOffsets[k];j<system.rangeOffsets[k+1];++j)
+                            cross+=system.rangeCross[j]*delta[system.rangeColumns[j]];
+                        const double D=system.rangeDiagonal[k],pointG=system.rangeGradient[k];
+                        const double denominator=D+lambda*std::max(D,1e-6);
+                        ranges[k]=std::clamp(-(pointG+cross)/denominator,lower[k],upper[k]);
+                        predicted-=cross*(pointG+0.5*cross)/denominator+
+                            ranges[k]*(pointG+cross+0.5*D*ranges[k]);
+                    }
+                    timing.cpuBackSubMs+=1000*elapsed(backSubStarted);
+                    summary.linear_solver_time_in_seconds+=elapsed(solveStarted);
+                    if(!ranges.allFinite()) { reason="nonfinite landmark step"; return false; }
+                    if(std::max(delta.lpNorm<Eigen::Infinity>(),ranges.lpNorm<Eigen::Infinity>())<1e-10) {
+                        converged=true; break;
+                    }
+                    double nextCost=0,gain=-1;
+                    if(predicted>0 && std::isfinite(predicted)) {
+                        bool valid=true;
+                        for(const auto& entry:variables) {
+                            const auto& v=entry.second;
+                            const auto& p=*v.block;
+                            const double* x=accepted.data()+v.offset;
+                            double* updated=candidate.data()+v.offset;
+                            const double* increment=v.column<retained?delta.data()+v.column:ranges.data()+v.column-retained;
+                            if(v.manifold) valid=v.manifold->Plus(x,increment,updated) && valid;
+                            else for(int j=0;j<v.width;++j) updated[j]=x[j]+increment[j];
+                            if(p.lower.size() || p.upper.size()) *updated=std::clamp(*updated,lowerBound(p),upperBound(p));
+                        }
+                        if(valid) {
+                            trial.write(candidate);
+                            const auto costStarted=std::chrono::steady_clock::now();
+                            if(problem.Evaluate(trialOptions,&nextCost,nullptr,nullptr,nullptr) && std::isfinite(nextCost))
+                                gain=(cost-nextCost)/predicted;
+                            const double trialTime=elapsed(costStarted);
+                            summary.residual_evaluation_time_in_seconds+=trialTime;
+                            timing.trialMs+=1000*trialTime;
+                            ++summary.num_residual_evaluations;
+                        }
+                    }
+                    ::ceres::IterationSummary iteration;
+                    iteration.iteration=i+1;
+                    summary.iterations.push_back(iteration);
+                    if(gain>1e-3) {
+                        accepted.swap(candidate);
+                        ++acceptedSteps;
+                        converged=cost-nextCost<=1e-6*std::max(1.0,cost);
+                        cost=nextCost;
+                        lambda=std::max(1e-12,lambda*std::max(1.0/3,1-std::pow(2*gain-1,3)));
+                        increase=2; newPoint=true;
+                        if(converged) break;
+                    } else {
+                        trial.write(accepted);
+                        lambda*=increase; increase*=2; newPoint=false;
+                    }
+                }
+                if(!acceptedSteps && !converged) { reason="no acceptable CUDA Schur trial"; return false; }
+                summary.final_cost=cost;
+                summary.num_parameter_blocks=problem.NumParameterBlocks();
+                summary.num_residual_blocks=problem.NumResidualBlocks();
+                summary.num_residuals=problem.NumResiduals();
+                summary.num_effective_parameters=dimension;
+                summary.num_effective_parameters_reduced=dimension;
+                summary.num_successful_steps=acceptedSteps;
+                summary.num_unsuccessful_steps=int(summary.iterations.size())-acceptedSteps;
+                summary.termination_type=converged ? ::ceres::CONVERGENCE : ::ceres::NO_CONVERGENCE;
+                summary.message="CUDA visual Schur, CPU retained system";
+                trial.keep=true;
+                result=std::move(summary);
+                return true;
+            }
+        }
+#endif
+        BackendOptimizer::BackendOptimizer(const BackendOptions& o) : options_(o), marginalizer_(o) {
+            options_.validate();
+#ifdef CGMLI_ENABLE_CUDA_ORB
+            if(o.visualBatchMode==VisualBatchMode::Cuda || o.visualBatchMode==VisualBatchMode::Hybrid ||
+                o.visualBatchMode==VisualBatchMode::Schur || o.visualBatchMode==VisualBatchMode::Audit)
+                visualCudaWorkspace_=std::make_shared<detail::VisualCudaWorkspace>();
+#endif
+        }
         ConstraintGradientReport BackendOptimizer::constraintGradients(const BackendGraph& graph,const std::vector<BlockKey>& keys) const {
             ConstraintGradientReport out; int columns=0;
             if(!graph.valid(&out.message)) return out;
@@ -145,9 +448,125 @@ namespace cgmli {
         SolveReport BackendOptimizer::optimize(BackendGraph& graph, const SolutionValidator& validator, const SolveBudget& requested) const {
             return optimizeImpl(graph,validator,requested,true);
         }
+        SolveReport BackendOptimizer::optimizeLatestTwo(BackendGraph& graph,const SolveBudget& requested,
+            const LandmarkStore* observations,StateId previous,StateId latest) const {
+            const std::array<BlockKey,4> freeBlocks{BlockKey::pose(previous),BlockKey::speedBias(previous),
+                BlockKey::pose(latest),BlockKey::speedBias(latest)};
+            const auto isFree=[&](BlockKey key) {
+                return std::find(freeBlocks.begin(),freeBlocks.end(),key)!=freeBlocks.end();
+            };
+            const auto touches=[&](const auto& keys) {
+                return std::any_of(keys.begin(),keys.end(),isFree);
+            };
+            BackendGraph local;
+            const auto addBlocks=[&](const auto& keys) {
+                for(auto key:keys) {
+                    auto [entry,inserted]=local.blocks.try_emplace(key,graph.blocks.at(key));
+                    if(inserted) entry->second.constant=!isFree(key);
+                }
+            };
+            for(const auto& item:graph.factors) if(item.second.participates() && touches(item.second.keys)) {
+                local.factors.emplace(item.first,item.second);
+                addBlocks(item.second.keys);
+            }
+            if(graph.prior && touches(graph.prior->keys())) {
+                local.prior=graph.prior;
+                addBlocks(graph.prior->keys());
+            }
+            const auto hasSupport=[&](const BackendGraph& candidate,std::string& reason) {
+                for(auto key:freeBlocks) if(!candidate.blocks.count(key)) {
+                    reason="missing pose or velocity block in two-frame solve";
+                    return false;
+                }
+                std::set<BlockKey> seen;
+                for(const auto& item:candidate.factors) {
+                    const auto& f=item.second;
+                    if(f.kind!=FactorKind::Visual || f.sensorEpoch!=latest || !f.participates()) continue;
+                    for(auto key:f.keys) if(key.kind==BlockKind::Landmark) seen.insert(key);
+                    if(seen.size()>=6) return true;
+                }
+                reason="fewer than six current landmarks in two-frame solve";
+                return false;
+            };
+            SolveReport out;
+            if(!hasSupport(local,out.message)) return out;
+            // Identify each IMU edge by its directed endpoints before solving the local graph.
+            const FactorRecord* oldImu=nullptr;
+            const FactorRecord* newImu=nullptr;
+            size_t imuCount=0;
+            for(const auto& item:local.factors) {
+                const auto& f=item.second;
+                if(f.kind!=FactorKind::Imu) continue;
+                ++imuCount;
+                if(f.keys.size()!=4 || f.cost->num_residuals()!=15) continue;
+                if(f.keys[2]==BlockKey::pose(previous)) oldImu=&f;
+                if(f.keys[0]==BlockKey::pose(previous) && f.keys[2]==BlockKey::pose(latest)) newImu=&f;
+            }
+            if(imuCount!=2 || !oldImu || !newImu) {
+                out.message="two-frame IMU bridge missing";
+                return out;
+            }
+            const auto imuNis=[&](const FactorRecord& f) {
+                std::array<const double*,4> parameters;
+                for(size_t i=0;i<parameters.size();++i) parameters[i]=local.blocks.at(f.keys[i]).value.data();
+                Eigen::Matrix<double,15,1> residual;
+                if(!f.cost->Evaluate(parameters.data(),residual.data(),nullptr))
+                    return std::numeric_limits<double>::quiet_NaN();
+                return residual.squaredNorm();
+            };
+            SolveReport::ImuEdgeNis oldNis,newNis;
+            oldNis.factor=oldImu->id; oldNis.before=imuNis(*oldImu);
+            newNis.factor=newImu->id; newNis.before=imuNis(*newImu);
+            if(!std::isfinite(oldNis.before) || !std::isfinite(newNis.before)) {
+                out.lightweightOldImu=oldNis; out.lightweightNewImu=newNis;
+                out.message="two-frame IMU residual invalid before solve";
+                return out;
+            }
+            SolveBudget budget=requested;
+            budget.maxIterations=std::min(3,requested.maxIterations.value_or(options_.maxIterations));
+            budget.minIterations=std::min(1,requested.minIterations.value_or(0));
+            budget.timeSeconds=std::min(0.008,requested.timeSeconds.value_or(options_.maxSolverTimeSeconds));
+            budget.numThreads=std::min(2,requested.numThreads.value_or(options_.numThreads));
+            budget.cameraRotationOnly=false;
+            budget.calibrationBlockViolation={};
+            out=optimizeImpl(local,hasSupport,budget,false,observations,latest);
+            out.lightweightOldImu=oldNis;
+            out.lightweightNewImu=newNis;
+            if(!out.accepted) return out;
+            out.lightweightOldImu.after=imuNis(*oldImu);
+            out.lightweightNewImu.after=imuNis(*newImu);
+            // Report both NIS values for diagnostics and require a valid IMU bridge.
+            if(!oldImu->participates() || !newImu->participates()
+                || !std::isfinite(out.lightweightOldImu.after) || !std::isfinite(out.lightweightNewImu.after)) {
+                out.accepted=false;
+                out.termination=SolveTermination::Failure;
+                out.message="two-frame IMU bridge invalid after solve";
+                return out;
+            }
+            constexpr double newImuNisLimit=60.0;
+            if(requested.gateLightweightNewImuNis && out.lightweightNewImu.after>newImuNisLimit) {
+                out.accepted=false;
+                out.termination=SolveTermination::Failure;
+                out.message="new IMU edge residual exceeded lightweight health gate";
+                return out;
+            }
+            for(auto key:freeBlocks) {
+                auto& value=graph.blocks.at(key).value;
+                const auto& solved=local.blocks.at(key).value;
+                if(key.kind==BlockKind::SpeedBias) value.head<3>()=solved.head<3>();
+                else value=solved;
+            }
+            for(auto& item:local.factors) if(item.second.lifecycle==FactorLifecycle::Rejected) {
+                auto& live=graph.factors.at(item.first);
+                live.lifecycle=FactorLifecycle::Rejected;
+                live.reason=std::move(item.second.reason);
+            }
+            return out;
+        }
         SolveReport BackendOptimizer::optimizeImpl(BackendGraph& graph,const SolutionValidator& validator,
             const SolveBudget& requested,bool validateInput,const LandmarkStore* observations,StateId currentFrame) const {
             SolveReport out;
+            const bool scoped=requested.latestTwoPoseVelocityOnly && currentFrame.isInitialised();
             out.analyticVisualJacobians=options_.analyticVisualJacobians;
             const int maxIterations=requested.maxIterations.value_or(options_.maxIterations);
             const int minIterations=requested.minIterations.value_or(0);
@@ -276,7 +695,7 @@ namespace cgmli {
             for (int pass = 0; pass <= options_.maxOutlierRefits; ++pass) {
                 // Reserve some of the remaining iteration allowance for possible outlier refits.
                 // The initial pass can therefore stop below maxIterations even without outliers.
-                // Only completed Ceres calls consume time. Gate evaluation,
+                // Only completed nonlinear solve passes consume time. Gate evaluation,
                 // Problem construction and inter-pass validation do not.
                 const double timeRemaining = timeLimit - out.ceresMs*1e-3;
                 const int minimumRemaining=std::max(0,minIterations-out.iterations);
@@ -302,6 +721,12 @@ namespace cgmli {
                     // Add only used parameters. Do not feed disconnected states to Ceres as unconstrained variables.
                     auto& used=workspace->used;
                     if(!workspace->built) {
+                        const auto batchMode=scoped?VisualBatchMode::Reference:options_.visualBatchMode;
+                        const bool audit=batchMode==VisualBatchMode::Audit &&
+                            (!currentFrame.isInitialised() || currentFrame.value()%30==0);
+                         if(batchMode==VisualBatchMode::Cuda || batchMode==VisualBatchMode::Hybrid ||
+                             batchMode==VisualBatchMode::Schur || audit)
+                            workspace->visualCache.configureBatch(batchMode,visualCudaWorkspace_);
                         for (const auto& item : graph.factors) if (item.second.participates())
                             used.insert(item.second.keys.begin(), item.second.keys.end());
                         if (graph.prior) used.insert(graph.prior->keys().begin(), graph.prior->keys().end());
@@ -329,6 +754,13 @@ namespace cgmli {
                         for (auto k : used) {
                             auto& block = graph.blocks.at(k);
                             detail::addBlock(problem, block, true);
+                            if(scoped && k.kind==BlockKind::SpeedBias && !block.constant) {
+                                // Both velocity blocks share the same bias mask. Keep the canonical graph layout.
+                                if(!workspace->velocityManifold)
+                                    workspace->velocityManifold=std::make_unique<::ceres::SubsetManifold>(
+                                        9,std::vector<int>{3,4,5,6,7,8});
+                                problem.SetManifold(block.value.data(),workspace->velocityManifold.get());
+                            }
                             if (requested.cameraRotationOnly && k.kind == BlockKind::CameraExtrinsic && !block.constant) {
                                 // Only this Ceres problem uses the restricted tangent. The graph,
                                 // marginalizer and FEJ prior keep the canonical six-dimensional tangent.
@@ -337,21 +769,59 @@ namespace cgmli {
                                 problem.SetManifold(block.value.data(), workspace->rigRotationManifold.get());
                             }
                         }
+                        std::vector<::ceres::ResidualBlockId> auditedVisual;
                         for (const auto& item : graph.factors) if (item.second.participates()) {
+                            const auto previousBatchSize=audit?workspace->visualCache.batchFactors():0;
                             const auto kind=item.second.kind;
                             const size_t category=kind==FactorKind::Visual?0:kind==FactorKind::Imu?1:kind==FactorKind::Lidar?2:4;
                             ::ceres::CostFunction* evaluated=item.second.cost.get();
                             if(kind==FactorKind::Visual) {
                                 std::vector<const double*> parameters;
-                                for(auto key:item.second.keys) parameters.push_back(graph.blocks.at(key).value.data());
+                                unsigned derivatives=0;
+                                for(auto key:item.second.keys) {
+                                    const auto& block=graph.blocks.at(key);
+                                    if(!block.constant && parameters.size()<5) derivatives|=1u<<parameters.size();
+                                    parameters.push_back(block.value.data());
+                                }
                                 auto cached=cacheWindowVisualCost(*evaluated,parameters,workspace->visualCache,options_.cacheVisualPairs,
-                                    fixedCameraTime);
+                                    fixedCameraTime,derivatives);
                                 if(cached) { evaluated=cached.get(); adapters.push_back(std::move(cached)); }
                             }
                             auto* measured=profiled(evaluated,category);
-                            workspace->residuals[item.first]=detail::addFactor(problem, graph, item.second,measured?measured:evaluated);
+                            const auto residual=detail::addFactor(problem, graph, item.second,measured?measured:evaluated);
+                            workspace->residuals[item.first]=residual;
+                            if(audit && workspace->visualCache.batchFactors()>previousBatchSize)
+                                auditedVisual.push_back(residual);
                         }
-                        if (graph.prior) { detail::addPrior(problem, graph,profiled(graph.prior.get(),3)); workspace->hasPrior=true; }
+                         if (graph.prior) {
+                             workspace->priorResidual=detail::addPrior(problem,graph,profiled(graph.prior.get(),3));
+                             workspace->hasPrior=true;
+                         }
+                        if(audit && workspace->visualCache.batchFactors()) {
+                            std::vector<double*> variables;
+                            std::vector<int> retained,eliminated;
+                            int column=0;
+                            for(auto key:used) {
+                                auto& block=graph.blocks.at(key);
+                                if(block.constant) continue;
+                                variables.push_back(block.value.data());
+                                const int width=problem.ParameterBlockTangentSize(block.value.data());
+                                auto& target=(schur && eliminate.count(key) && width==1)?eliminated:retained;
+                                for(int j=0;j<width;++j) target.push_back(column++);
+                            }
+                            const auto verification=detail::auditVisualWindow(problem,workspace->visualCache,variables,
+                                retained,eliminated,auditedVisual,options_.visualHuberScale);
+                            LOG(INFO)<<"[VisualBatchAudit] frame="<<currentFrame.value()
+                                <<" visual_factors="<<workspace->visualCache.batchFactors()
+                                <<" host="<<verification.host<<" cuda="<<verification.cuda
+                                <<" normal="<<verification.normal<<" schur="<<verification.schur
+                                <<" residual="<<verification.residual<<" jacobian="<<verification.jacobian
+                                <<" normal_H="<<verification.normalH<<" normal_g="<<verification.normalG
+                                <<" reduced_H="<<verification.reducedH<<" reduced_g="<<verification.reducedG
+                                <<" direct_normal="<<verification.direct<<" direct_H="<<verification.directH
+                                <<" direct_g="<<verification.directG<<" direct_step="<<verification.directStep;
+                            for(auto& counter:counters) counter.reset();
+                        }
                         workspace->built=true; ++out.problemBuilds;
                     } else {
                         // Post-fit NIS only removes measurements; it cannot introduce
@@ -413,12 +883,13 @@ namespace cgmli {
                         // Prefer an available sparse normal-equation backend. Do not blindly use
                         // a Schur landmark ordering: a historical dense prior can couple several
                         // landmark blocks in one residual, violating Schur's independent-set rule.
-                        if(options_.linearSolver==BackendLinearSolver::DenseSchur && options_.preferLandmarkSchur && schur) {
+                        if(!scoped && options_.linearSolver==BackendLinearSolver::DenseSchur && options_.preferLandmarkSchur && schur) {
                             solver.linear_solver_type=::ceres::DENSE_SCHUR;
                             solver.linear_solver_ordering=std::make_shared<::ceres::ParameterBlockOrdering>();
                             for(auto key:used) if(!graph.blocks.at(key).constant)
                                 solver.linear_solver_ordering->AddElementToGroup(graph.blocks.at(key).value.data(),key.kind==BlockKind::Landmark?0:1);
-                        } else if (options_.linearSolver == BackendLinearSolver::SparseNormalCholesky || options_.linearSolver==BackendLinearSolver::DenseSchur) {
+                        } else if (!scoped && (options_.linearSolver==BackendLinearSolver::SparseNormalCholesky ||
+                            options_.linearSolver==BackendLinearSolver::DenseSchur)) {
                             if (::ceres::IsSparseLinearAlgebraLibraryTypeAvailable(::ceres::SUITE_SPARSE)) {
                                 solver.linear_solver_type = ::ceres::SPARSE_NORMAL_CHOLESKY;
                                 solver.sparse_linear_algebra_library_type = ::ceres::SUITE_SPARSE;
@@ -459,9 +930,43 @@ namespace cgmli {
                         if(minimumRemaining>0) solver.callbacks.push_back(&timer);
                         solver.num_threads = numThreads;
                         solver.minimizer_progress_to_stdout = false;
-                        solveStarted=std::chrono::steady_clock::now();
-                        ::ceres::Solve(solver, &problem, &summary);
+                         solveStarted=std::chrono::steady_clock::now();
+                         bool nativeSchur=false;
+#ifdef CGMLI_ENABLE_CUDA_ORB
+                         // Refit the cleaned topology with the regular solver.
+                         // Its callback keeps CPU trial costs in Schur mode.
+                         if(!scoped && pass==0 && requested.allowOnlineSchur && options_.visualBatchMode==VisualBatchMode::Schur) {
+                             std::string reason;
+                             OnlineSchurTiming timing;
+                             nativeSchur=solveVisualSchur(graph,*workspace,options_.visualHuberScale,budget,
+                                 minimumRemaining,numThreads,timeRemaining,summary,timing,reason);
+                             const double attempt=std::chrono::duration<double,std::milli>(
+                                 std::chrono::steady_clock::now()-solveStarted).count();
+                             if(out.factorProfiled || !nativeSchur)
+                                 LOG(INFO)<<"[OnlineSchur] frame="<<currentFrame.value()<<" accepted="<<nativeSchur
+                                     <<" attempt_ms="<<attempt<<" factors="<<workspace->visualCache.batchFactors()
+                                     <<" cpu_normal_ms="<<timing.cpuNormalMs<<" gpu_launch_ms="<<timing.gpuLaunchMs
+                                     <<" gpu_reduce_wait_ms="<<timing.gpuReduceWaitMs<<" cpu_linear_ms="<<timing.cpuLinearMs
+                                     <<" cpu_backsub_ms="<<timing.cpuBackSubMs<<" cpu_trial_ms="<<timing.trialMs
+                                     <<" reason="<<(nativeSchur?"accepted":reason);
+                             if(!nativeSchur && !minimumRemaining)
+                                 solver.max_solver_time_in_seconds=std::max(1e-9,timeRemaining-attempt*1e-3);
+                         }
+#endif
+                         if(!nativeSchur) ::ceres::Solve(solver, &problem, &summary);
                         out.ceresMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-solveStarted).count();
+                          if(!scoped && !nativeSchur && (options_.visualBatchMode==VisualBatchMode::Cuda ||
+                             options_.visualBatchMode==VisualBatchMode::Hybrid || options_.visualBatchMode==VisualBatchMode::Schur) &&
+                            (out.factorProfiled || workspace->visualCache.batchFailures))
+                            LOG(INFO)<<"[VisualBatchSolve] frame="<<currentFrame.value()<<" pass="<<pass
+                                <<" factors="<<workspace->visualCache.batchFactors()
+                                <<" evaluations="<<workspace->visualCache.batchEvaluations
+                                 <<" cpu_trials="<<workspace->visualCache.batchCpuTrials
+                                <<" failures="<<workspace->visualCache.batchFailures
+                                <<" invalid_factors="<<workspace->visualCache.batchInvalid
+                                <<" jacobian_download_bytes="<<workspace->visualCache.batchJacobianBytes
+                                <<" old_jacobian_download_bytes="<<workspace->visualCache.batchDenseJacobianBytes
+                                <<" elapsed_ms="<<workspace->visualCache.batchMs;
                         out.ceresTimeBudgetReached=out.ceresMs*1e-3>=timeLimit;
                         ++out.passes;
                         out.linearSolverMs+=std::max(0.0,summary.linear_solver_time_in_seconds)*1000;
@@ -473,9 +978,12 @@ namespace cgmli {
                         out.lineSearchGradientMs+=std::max(0.0,summary.line_search_gradient_evaluation_time_in_seconds)*1000;
                         out.lineSearchMs+=std::max(0.0,summary.line_search_total_time_in_seconds)*1000;
                         out.parameterBlocks=summary.num_parameter_blocks; out.residualBlocks=summary.num_residual_blocks;
-                        out.residualDimension=summary.num_residuals; out.effectiveParameters=summary.num_effective_parameters;
-                        out.linearSolverUsed=::ceres::LinearSolverTypeToString(summary.linear_solver_type_used);
-                        out.sparseBackend=(solver.linear_solver_type==::ceres::DENSE_QR || solver.linear_solver_type==::ceres::DENSE_SCHUR)?"none":
+                         out.residualDimension=summary.num_residuals;
+                         out.effectiveParameters=scoped?summary.num_effective_parameters_reduced:summary.num_effective_parameters;
+                         out.linearSolverUsed=nativeSchur?"GPU_SCHUR_CPU_LDLT":
+                             ::ceres::LinearSolverTypeToString(summary.linear_solver_type_used);
+                         if(nativeSchur) out.lineSearchInterpolation="none";
+                         out.sparseBackend=(nativeSchur || solver.linear_solver_type==::ceres::DENSE_QR || solver.linear_solver_type==::ceres::DENSE_SCHUR)?"none":
                             ::ceres::SparseLinearAlgebraLibraryTypeToString(solver.sparse_linear_algebra_library_type);
                         out.visualPosePrepareMs=workspace->visualCache.posePrepareMs;
                         out.visualCameraPrepareMs=workspace->visualCache.cameraPrepareMs;

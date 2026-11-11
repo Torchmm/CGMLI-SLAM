@@ -21,6 +21,9 @@
 #include <stdexcept>
 #include <type_traits>
 #include <map>
+#ifdef CGMLI_ENABLE_CUDA_ORB
+#include <cuda_runtime_api.h>
+#endif
 
 using namespace cgmli;
 using namespace cgmli::features;
@@ -432,6 +435,67 @@ namespace {
         Eigen::Matrix2d w; bool aligned;
         require(!orb.samplingWarp(centre(), w, aligned), "Excessive warp stretch must be rejected");
     }
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    bool hasCudaDevice() {
+        int count=0;
+        return cudaGetDeviceCount(&count)==cudaSuccess && count>0;
+    }
+    void cudaExtractionAgreement() {
+        const auto compare=[](OrbFeatureExtractor& cpu,OrbFeatureExtractor& gpu,const cv::Mat& image,
+            const cv::Mat& mask,const std::vector<cv::KeyPoint>& input) {
+            auto expected=input,actual=input;
+            cv::Mat cpuRows,gpuRows;
+            cpu.detectAndCompute(image,mask,expected,cpuRows,!input.empty());
+            gpu.detectAndCompute(image,mask,actual,gpuRows,!input.empty());
+            require(gpu.lastTiming().usedCuda==mask.empty(),"CUDA extraction or dynamic-mask fallback was not exercised");
+            if(input.empty()) require(cpu.lastTiming().fastCandidates==gpu.lastTiming().fastCandidates &&
+                cpu.lastTiming().geometryExpansionRounds==gpu.lastTiming().geometryExpansionRounds,
+                "CUDA ORB changed the candidate replenishment policy");
+            if(expected.size()!=actual.size())
+                throw std::runtime_error("CUDA ORB keypoint count differs: "+std::to_string(expected.size())+
+                    " CPU, "+std::to_string(actual.size())+" GPU");
+            for(size_t i=0;i<expected.size();++i) {
+                const auto& a=expected[i]; const auto& b=actual[i];
+                require(a.pt==b.pt && a.octave==b.octave && a.response==b.response &&
+                    a.size==b.size && a.angle==b.angle && a.class_id==b.class_id,
+                    "CUDA ORB changed keypoint identity, order or orientation");
+            }
+            require(cpuRows.empty()==gpuRows.empty() &&
+                (cpuRows.empty() || cv::norm(cpuRows,gpuRows,cv::NORM_HAMMING)==0),
+                "CUDA ORB changed descriptor bits");
+        };
+        auto settings=options(); settings.maxFeatures=120;
+        auto cudaSettings=settings; cudaSettings.useCuda=true;
+        auto camera=pinhole();
+        OrbFeatureExtractor cpu(camera,settings),gpu(camera,cudaSettings);
+        gpu.prepareStaticCaches();
+        require(gpu.cudaReady(),"CUDA ORB startup failed on an available GPU");
+        cpu.setExtractionDirection(Eigen::Vector3d::UnitY());
+        gpu.setExtractionDirection(Eigen::Vector3d::UnitY());
+        cv::Mat storage(161,181,CV_8UC1,cv::Scalar(0));
+        auto image=storage(cv::Rect(7,0,161,161)); texture().copyTo(image);
+        compare(cpu,gpu,image,{},{}); // strided input and several pyramid levels
+        cv::Mat lowContrast; image.convertTo(lowContrast,CV_8UC1,0.05,100);
+        compare(cpu,gpu,lowContrast,{},{}); // low threshold and cell borders
+        cv::Mat mask(image.size(),CV_8UC1,cv::Scalar(255)); mask(cv::Rect(64,65,14,25)).setTo(0);
+        compare(cpu,gpu,image,mask,{});
+        cpu.setExtractionDirection(Eigen::Vector3d::UnitZ());
+        gpu.setExtractionDirection(Eigen::Vector3d::UnitZ());
+        compare(cpu,gpu,image,{},{centre(),centre(1),cv::KeyPoint(82.3f,75.7f,31,0,1,2)});
+
+        auto eucm=std::make_shared<cameras::EucmCamera>(601,601,100,100,300,300,0.6,1.0);
+        settings.virtualFocalLength=100; settings.maximumWarpStretch=8; settings.maximumWarpCondition=100;
+        cudaSettings=settings; cudaSettings.useCuda=true;
+        OrbFeatureExtractor cpuWide(eucm,settings),gpuWide(eucm,cudaSettings);
+        cpuWide.setExtractionDirection(Eigen::Vector3d::UnitY());
+        gpuWide.setExtractionDirection(Eigen::Vector3d::UnitY());
+        cv::Mat wide(601,601,CV_8UC1);
+        cv::RNG rng(216); rng.fill(wide,cv::RNG::UNIFORM,0,256);
+        compare(cpuWide,gpuWide,wide,{},{cv::KeyPoint(480,300,31),cv::KeyPoint(300,300,31)});
+        compare(cpuWide,gpuWide,wide,{},{});
+    }
+#endif
+
     void rearHemisphereEucm() {
         auto camera = std::make_shared<cameras::EucmCamera>(601, 601, 100, 100, 300, 300, 0.6, 1.0);
         auto o = options(); o.virtualFocalLength = 100;
@@ -516,6 +580,9 @@ void cgmli::debug::registerExtractionCases(std::vector<cgmli::debug::ModuleCase>
     cases.push_back({"extraction","fullWarpedMaskSupport",[]() { fullWarpedMaskSupport(); }});
     cases.push_back({"extraction","rejectExcessiveStretch",[]() { rejectExcessiveStretch(); }});
     cases.push_back({"extraction","rearHemisphereEucm",[]() { rearHemisphereEucm(); }});
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    if(hasCudaDevice()) cases.push_back({"extraction","cudaExtractionAgreement",[]() { cudaExtractionAgreement(); }});
+#endif
     cases.push_back({"extraction","frameAdapterAndRepeatability",[]() { frameAdapterAndRepeatability(); }});
     cases.push_back({"extraction","multiCameraGravityAndReuse",[]() { multiCameraGravityAndReuse(); }});
     cases.push_back({"jacobian","projectionDerivativeAgreement",[]() { projectionDerivativeAgreement(); }});
@@ -534,6 +601,9 @@ int main() {
         cachedExtractionAndDynamicMasks(); sparseSamplerAndAnalyticWarpAgreement(); batchedDescriptorCoordinatesMatchScalar(); adaptiveGeometryBatchesPreserveSupport(); layerFastAndCompactIntegralAgreement(); budgetDrivenFallbackPreservesCoverage();
         projectionDerivativeAgreement(); fullWarpedMaskSupport(); rejectExcessiveStretch();
         rearHemisphereEucm();
+#ifdef CGMLI_ENABLE_CUDA_ORB
+        if(hasCudaDevice()) cudaExtractionAgreement();
+#endif
         cameraVariant(cameras::EquidistantDistortion(-0.01, 0.001, 0, 0));
         cameraVariant(cameras::RadialTangentialDistortion(-0.01, 0.001, 0.0001, 0.0001));
         cameraVariant(cameras::RadialTangentialDistortion8(-0.01, 0.001, 0.0001, 0.0001, 0, 0, 0, 0));

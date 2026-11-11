@@ -66,6 +66,9 @@
     <ClCompile Include="..\src\frontend\stereo_triangulation.cpp">
       <Filter>源文件\frontend</Filter>
     </ClCompile>
+    <CudaCompile Include="..\src\visual\features\OrbCuda.cu">
+      <Filter>源文件\visual\features</Filter>
+    </CudaCompile>
     <ClCompile Include="..\src\visual\features\OrbFeatureExtractor.cpp">
       <Filter>源文件\visual\features</Filter>
     </ClCompile>
@@ -75,6 +78,9 @@
     <ClCompile Include="..\src\visual\features\OrbMatcher.cpp">
       <Filter>源文件\visual\features</Filter>
     </ClCompile>
+    <CudaCompile Include="..\src\visual\features\OrbMatchCuda.cu">
+      <Filter>源文件\visual\features</Filter>
+    </CudaCompile>
     <ClCompile Include="..\src\visual\pose_solver\AbsolutePoseSolver.cpp">
       <Filter>源文件\visual\pose_solver</Filter>
     </ClCompile>
@@ -143,6 +149,9 @@
     <ClInclude Include="..\src\common\Measurements.hpp">
       <Filter>源文件\common</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\common\CudaArray.hpp">
+      <Filter>源文件\common</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\common\Parameters.hpp">
       <Filter>源文件\common</Filter>
     </ClInclude>
@@ -166,6 +175,12 @@
     </ClInclude>
     <ClInclude Include="..\src\frontend\stereo_triangulation.hpp">
       <Filter>源文件\frontend</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\features\OrbCuda.hpp">
+      <Filter>头文件\visual\features</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\visual\features\OrbMatchCuda.hpp">
+      <Filter>头文件\visual\features</Filter>
     </ClInclude>
     <ClInclude Include="..\src\visual\features\OrbFeatureExtractor.hpp">
       <Filter>头文件</Filter>
@@ -308,7 +323,22 @@
     <ClCompile Include="..\src\backend\WindowVisualFactor.cpp">
       <Filter>源文件\backend</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\backend\VisualBatchAudit.cpp">
+      <Filter>源文件\backend</Filter>
+    </ClCompile>
+    <CudaCompile Include="..\src\backend\VisualCudaBatch.cu">
+      <Filter>源文件\backend</Filter>
+    </CudaCompile>
     <ClInclude Include="..\src\backend\WindowVisualFactor.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\backend\VisualBatchAudit.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\backend\VisualCudaBatch.hpp">
+      <Filter>源文件\backend</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\backend\VisualSphereBatchMath.hpp">
       <Filter>源文件\backend</Filter>
     </ClInclude>
     <None Include="..\src\backend\legacy\ViSlamBackend.hpp.reference">

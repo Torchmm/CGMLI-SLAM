@@ -58,7 +58,11 @@
     <IntDir>$(ProjectDir)module_debug\$(Platform)\$(Configuration)\obj\</IntDir>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <CgmliCudaOrb Condition="'$(CgmliCudaOrb)'=='' and '$(Platform)'=='x64' and Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.props')">true</CgmliCudaOrb>
+  </PropertyGroup>
   <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.props" Condition="'$(CgmliCudaOrb)'=='true'" />
   </ImportGroup>
   <ImportGroup Label="Shared">
   </ImportGroup>
@@ -153,9 +157,12 @@
     <ClCompile Include="..\src\pipeline\ThreadedSlam.cpp" />
     <ClCompile Include="..\src\utils\Duration.cpp" />
     <ClCompile Include="..\src\utils\Time.cpp" />
+    <CudaCompile Include="..\src\visual\features\OrbCuda.cu" Condition="'$(CgmliCudaOrb)'=='true'" />
     <ClCompile Include="..\src\visual\features\OrbFeatureExtractor.cpp" />
     <ClCompile Include="..\src\visual\features\OrbFrameAdapter.cpp" />
     <ClCompile Include="..\src\visual\features\OrbMatcher.cpp" />
+    <CudaCompile Include="..\src\visual\features\OrbMatchCuda.cu" Condition="'$(CgmliCudaOrb)'=='true'" />
+    <ClInclude Include="..\src\visual\features\OrbMatchCuda.hpp" />
     <ClCompile Include="..\src\visual\pose_solver\AbsolutePoseSolver.cpp" />
     <ClCompile Include="..\src\visual\pose_solver\PoseSolverTypes.cpp" />
     <ClCompile Include="..\src\visual\pose_solver\RelativePoseSolver.cpp" />
@@ -189,6 +196,7 @@
     <ClInclude Include="..\src\visual\features\OrbBriefPattern.hpp" />
     <ClInclude Include="..\src\visual\features\OrbCameraAwareSampling.hpp" />
     <ClInclude Include="..\src\visual\features\OrbSparseSampling.hpp" />
+    <ClInclude Include="..\src\visual\features\OrbCuda.hpp" />
     <ClInclude Include="..\src\visual\features\OrbFeatureExtractor.hpp" />
     <ClInclude Include="..\src\visual\features\OrbFrameAdapter.hpp" />
     <ClInclude Include="..\src\visual\features\OrbMatcher.hpp" />
@@ -233,11 +241,30 @@
     <ClInclude Include="..\src\backend\ViSlamBackend.hpp" />
     <ClInclude Include="..\src\backend\WindowDataTypes.hpp" />
     <ClCompile Include="..\src\backend\WindowVisualFactor.cpp" />
+    <ClCompile Include="..\src\backend\VisualBatchAudit.cpp" />
+    <CudaCompile Include="..\src\backend\VisualCudaBatch.cu" Condition="'$(CgmliCudaOrb)'=='true'">
+      <AdditionalOptions>--expt-relaxed-constexpr %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
+    <ClInclude Include="..\src\backend\VisualBatchAudit.hpp" />
+    <ClInclude Include="..\src\backend\VisualCudaBatch.hpp" />
+    <ClInclude Include="..\src\backend\VisualSphereBatchMath.hpp" />
+    <ClInclude Include="..\src\common\CudaArray.hpp" />
     <ClInclude Include="..\src\backend\WindowVisualFactor.hpp" />
     <None Include="..\src\backend\legacy\ViSlamBackend.hpp.reference" />
   </ItemGroup>
+  <ItemDefinitionGroup Condition="'$(CgmliCudaOrb)'=='true'">
+    <ClCompile>
+      <PreprocessorDefinitions>CGMLI_EMBED_MODULE_TESTS;CGMLI_ENABLE_CUDA_ORB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <CudaCompile>
+      <CodeGeneration>compute_61,sm_61;compute_61,compute_61</CodeGeneration>
+      <AdditionalOptions>--std=c++17 --fmad=false %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
+  </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.targets" Condition="'$(CgmliCudaOrb)'=='true'" />
   </ImportGroup>
   <ItemGroup>
     <ClCompile Include="..\src\frontend\OrbFrontendFeatures.cpp" />

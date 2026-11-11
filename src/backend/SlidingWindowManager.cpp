@@ -23,14 +23,19 @@ namespace cgmli {
             // queue is diagnostic only and is never replayed as optimization evidence.
             recordEvent({f.id,f.kind,f.lifecycle,f.reason});
         }
-        void SlidingWindowManager::collectTerminalFactors() {
+        void SlidingWindowManager::collectTerminalFactors(std::vector<KeypointIdentifier>* rejectedVisual) {
             for (auto it = graph_.factors.begin(); it != graph_.factors.end();) {
                 if (it->second.lifecycle == FactorLifecycle::Rejected || it->second.lifecycle == FactorLifecycle::Marginalized) {
+                    if(rejectedVisual && it->second.lifecycle==FactorLifecycle::Rejected) {
+                        const auto observation=landmarks_.byFactor_.find(it->first);
+                        if(observation!=landmarks_.byFactor_.end()) rejectedVisual->push_back(observation->second);
+                    }
                     landmarks_.factorRemoved(it->first,it->second.lifecycle==FactorLifecycle::Marginalized);
                     record(it->second); it = graph_.factors.erase(it);
                 }
                 else ++it;
             }
+            if(rejectedVisual) std::sort(rejectedVisual->begin(),rejectedVisual->end());
         }
         bool SlidingWindowManager::ready(const FactorRecord& f) const {
             // Both epoch metadata and parameter buffers must exist. Checking only keys
@@ -215,6 +220,37 @@ namespace cgmli {
             // retention. A non-keyframe is removed while the newest prediction survives.
             if (size() < 2 || frames_.epochs_.at(order_[size() - 2]).keyframe) return MarginalizationPolicy::MARGIN_OLD;
             return MarginalizationPolicy::MARGIN_SECOND_NEW;
+        }
+        bool SlidingWindowManager::canOptimizeLatestTwo() const {
+            if(!needsMarginalization() || size()<3 || choosePolicy()!=MarginalizationPolicy::MARGIN_SECOND_NEW) return false;
+            const auto left=order_[size()-3],middle=order_[size()-2],right=order_.back();
+            const auto& latest=frames_.epochs_.at(right);
+            if(latest.keyframe || latest.visual!=SensorHealth::Valid || latest.lidar!=SensorHealth::Invalid) return false;
+            const auto& leftEpoch=frames_.epochs_.at(left);
+            const auto& middleEpoch=frames_.epochs_.at(middle);
+            if((latest.timestamp-leftEpoch.timestamp).toSec()>options_.maxImuIntervalSeconds) return false;
+            const auto middlePose=BlockKey::pose(middle),middleSpeed=BlockKey::speedBias(middle);
+            if(graph_.prior && std::find(graph_.prior->keys().begin(),graph_.prior->keys().end(),middleSpeed)
+                !=graph_.prior->keys().end()) return false;
+            const auto interval=[](const FactorRecord& factor,const EpochNode& from,const EpochNode& to) {
+                return factor.solveEnabled && factor.imuReplay && factor.imuReplay->completeSamples
+                    && factor.imuReplay->start==from.timestamp && factor.imuReplay->end==to.timestamp
+                    && factor.keys.size()==4 && factor.keys.front()==BlockKey::pose(from.id)
+                    && factor.keys[2]==BlockKey::pose(to.id);
+            };
+            bool incoming=false,outgoing=false;
+            size_t imuEdges=0;
+            for(const auto& item:graph_.factors) {
+                const auto& f=item.second;
+                if(f.lifecycle!=FactorLifecycle::Active || f.kind==FactorKind::Visual) continue;
+                if(std::none_of(f.keys.begin(),f.keys.end(),[&](BlockKey k) {return k==middlePose || k==middleSpeed;}))
+                    continue;
+                if(f.kind!=FactorKind::Imu) return false;
+                ++imuEdges;
+                incoming=incoming || interval(f,leftEpoch,middleEpoch);
+                outgoing=outgoing || interval(f,middleEpoch,latest);
+            }
+            return imuEdges==2 && incoming && outgoing;
         }
         std::optional<StateEstimate> SlidingWindowManager::estimate(StateId id) const {
             auto e = frames_.epochs_.find(id); if (e == frames_.epochs_.end()) return std::nullopt;

@@ -4,6 +4,7 @@
 namespace cgmli {
     namespace backend {
         class LandmarkStore;
+        namespace detail { struct VisualCudaWorkspace; }
         /// Application quality gate evaluated after numeric/NIS/calibration checks. Return false
         /// with a reason to reject the candidate. The graph is a synchronous, borrowed view;
         /// do not store it, mutate shared costs, or recursively enter the backend from the callback.
@@ -47,7 +48,7 @@ namespace cgmli {
             // Refit after removing new outliers while budget remains. At a solve limit,
             // retain the last usable state only if the cleaned graph passes all quality
             // gates; unrefittedOutliers explicitly reports its incomplete refinement.
-            // All passes share iteration and Ceres-only time budgets.
+            // All passes share the iteration and nonlinear solver time budgets.
             SolveReport optimize(BackendGraph& graph, const SolutionValidator& validator = {}, const SolveBudget& budget = {}) const;
             /// Compute Hcc-Hcx*Hxx^dagger*Hxc from whitened, pre-robust Jacobians, including
             /// derivatives of frozen blocks. Explicit calibration priors are excluded; callers
@@ -57,6 +58,7 @@ namespace cgmli {
             ConstraintGradientReport constraintGradients(const BackendGraph& graph,const std::vector<BlockKey>& keys) const;
         private:
             friend class FixedLagBackend;
+            SolveReport optimizeLatestTwo(BackendGraph&,const SolveBudget&,const LandmarkStore*,StateId previous,StateId latest) const;
             SolveReport optimizeImpl(BackendGraph&,const SolutionValidator&,const SolveBudget&,bool validateInput,
                 const LandmarkStore* observations=nullptr,StateId currentFrame=StateId()) const;
             struct GateEntry {
@@ -68,6 +70,7 @@ namespace cgmli {
                 ResidualStatisticsArray* evaluated=nullptr,ResidualStatisticsArray* admitted=nullptr,double* statisticsMs=nullptr) const;
             BackendOptions options_;
             Marginalizer marginalizer_;
+            std::shared_ptr<detail::VisualCudaWorkspace> visualCudaWorkspace_;
         };
     }
 }

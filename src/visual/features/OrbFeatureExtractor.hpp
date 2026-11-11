@@ -8,6 +8,7 @@
 
 namespace cgmli {
     namespace features {
+        namespace detail { class OrbCuda; struct OrbCudaDescriptorRows; }
 
         struct OrbExtractorOptions {
             enum class DescriptorMode { Standard, GravityAligned, GravityCameraAware };
@@ -38,6 +39,9 @@ namespace cgmli {
             bool balanceBearings = true; ///< Requires a camera model; default SLAM path.
             int azimuthBins = 16;
             int zBins = 8; ///< Uniform z bands + azimuth sectors have equal solid angle.
+            bool useCuda = false; ///< The SLAM frontend enables this when the CUDA build is available.
+            bool cudaEarlyIntegral = true; ///< Prefetch integrals while the CPU selects keypoints.
+            bool keepCudaDescriptorRows = false; ///< Allow the rig matcher to reuse current-frame device rows.
         };
 
         struct OrbDistribution {
@@ -57,6 +61,9 @@ namespace cgmli {
             size_t budgetSkippedCells=0;
             size_t fastRawPixels=0,balanceHeapPushes=0;
             size_t geometryMemoHits=0,geometryExpansionRounds=0;
+            bool usedCuda=false;
+            double gpuUploadMs=0,gpuPyramidMs=0,gpuFastMs=0,gpuCornersDownloadMs=0;
+            double gpuIntegralMs=0,gpuDescriptorMs=0,gpuDescriptorsDownloadMs=0;
         };
 
         /// CPU Reference for framework V1.10 sections 8/8.1.
@@ -70,6 +77,7 @@ namespace cgmli {
         public:
             explicit OrbFeatureExtractor(std::shared_ptr<const cameras::CameraBase> camera,
                 const OrbExtractorOptions& options = {});
+            ~OrbFeatureExtractor() override;
             using cv::Feature2D::detect;
             using cv::Feature2D::compute;
             void detect(cv::InputArray image, std::vector<cv::KeyPoint>& keypoints,
@@ -122,6 +130,8 @@ namespace cgmli {
             /// Requires calibrated geometry; neither an image nor gravity is needed.
             /// Repeated calls reuse the cache. Calibration/mask changes require a new instance.
             void prepareStaticCaches();
+            bool cudaReady() const;
+            std::shared_ptr<const detail::OrbCudaDescriptorRows> cudaDescriptorRows() const { return cudaDescriptorRows_; }
 
         private:
             struct KeypointGeometry {
@@ -136,12 +146,19 @@ namespace cgmli {
             struct GeometryMemo { bool valid=false,geometricallyValid=false; Candidate candidate; };
             struct Pyramid {
                 std::vector<cv::Mat> images,safeMasks,samplingMasks,invalidIntegrals,cellMasks;
+                detail::OrbCuda* cuda=nullptr;
             };
             cv::Mat grayscale(cv::InputArray image) const;
             cv::Mat combinedMask(const cv::Mat& gray, cv::InputArray mask) const;
             void initialiseLevels(const cv::Size& size);
             void buildPyramid(const cv::Mat& gray, cv::InputArray mask, Pyramid& pyramid);
             void buildMasks(const cv::Mat& baseMask, Pyramid& pyramid) const;
+#ifdef CGMLI_ENABLE_CUDA_ORB
+            void prepareCuda();
+            void disableCuda(const char* reason);
+            void computeCuda(const Pyramid& pyramid,std::vector<cv::KeyPoint>& keypoints,
+                cv::OutputArray descriptors,const std::vector<KeypointGeometry>& geometry);
+#endif
             std::vector<int> levelBudgets(int activeLevels) const;
             int directionBin(const cv::Point2f& pixel) const;
             int directionBin(const Eigen::Vector3d& bearing) const;
@@ -165,6 +182,7 @@ namespace cgmli {
             bool hasGravity_ = false;
             double virtualFocalLength_ = 0.0;
             OrbExtractionTiming lastTiming_;
+            std::shared_ptr<const detail::OrbCudaDescriptorRows> cudaDescriptorRows_;
             // Masks depend only on the immutable calibration and pyramid layout.
             // External masks take a per-call path and never overwrite this cache.
             cv::Size pyramidBaseSize_;
@@ -183,6 +201,10 @@ namespace cgmli {
             std::vector<GeometryMemo> geometryMemoScratch_;
             std::vector<cv::Mat> geometryMemoIndexScratch_;
             bool staticMasksReady_=false;
+#ifdef CGMLI_ENABLE_CUDA_ORB
+            std::unique_ptr<detail::OrbCuda> cuda_;
+            bool cudaDisabled_=false;
+#endif
         };
     }
 }

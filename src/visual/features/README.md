@@ -85,7 +85,7 @@ ORB 点对来自 [OpenCV 4.8.0 的 31×31 学习模式](https://github.com/openc
 
 默认配置由 `getDefaultName()` 标识为 `cgmli.ORB.GravityCameraAware.SparseBox.v3`（纯重力模式为 `cgmli.ORB.Gravity.SparseBox.v3`）。Gaussian 参考后端保留 v2 标识。不能把不同后端、v1、普通 ORB 和 v3 描述子混用；已有地图观测/词袋词典需按当前配置重新生成。参与匹配的观测应使用同一模式和一致的参考尺度配置。`Frontend` 的实际提取入口及描述子消费格式现已改为 ORB，具体接入和旧关联模块边界见 `src/frontend/README.md`。
 
-## 缓存与后续 CUDA
+## 缓存与 CUDA
 
 标定和 camera mask 在构造时冻结；改变后应重新 configure。`rayDirections()`、`projectionJacobians()`、`geometryValidMask()` 返回可供上传 GPU 的只读 LUT，`samplingWarp()` 可供比较 CPU/GPU 每点基础几何；原始点对在 `OrbBriefPattern.hpp`，默认稀疏路径与去重表在 `OrbSparseSampling.hpp`，可选 tile 参考流程在 `OrbCameraAwareSampling.hpp`。同一相机的方向更新与提取不可并发，多个相机使用独立实例；使用新帧前更新方向。
 
@@ -126,7 +126,15 @@ CPU 提取路径采用以下复用边界：
 | `budget_skipped_cells` | 原本细格配额不足，但因粗分区已有支持且全层可选容量已足够而未执行低阈值补点的网格数 |
 | `gray_integrals32` | 使用精确 int32 前缀和的层数，计入 `gray_integrals`；1280×800 全白图的最大前缀和为 261120000，可安全使用 |
 
-目前仍为 CPU 实现，未新增 CUDA kernel。默认路径的积分图是每层共享的全局存储，每点灰度缓存只有 1500 字节；CUDA 可并行计算积分图、稀疏采样和位打包，不需要默认分配逐特征大 tile。积分图构建/带宽并非免费，375 个位置也多于 BRISK 的 66 个；整体前端仍包含 FAST、几何筛选和分布选择，需要统一实测，不能承诺未经测量的加速倍数。参考 tile 后端用于质量对照，较大 tile 需额外存储。
+VS x64 工程检测到 CUDA 12.6 构建组件后启用 CUDA 提取。默认的 `GravityCameraAware + SparseBox` 联合提取可在设备端生成灰度金字塔、FAST-9 分数和逐格 NMS 候选，并计算积分图、重力极点纹理方向及描述子。每相机复用独立 stream、显存和页锁定缓冲。CPU 复用原有几何、网格配额与球面均衡规则，最终关键点和 32 字节描述子按原顺序写入 Frame。动态外部掩码、其他提取模式或 CUDA 初始化及执行失败时使用 CPU 路径。
+
+可在启动程序前用 PowerShell 设置 `$env:CGMLI_ORB_BACKEND = 'cpu'` 运行同一二进制的 CPU 对照组，恢复默认用 `Remove-Item Env:CGMLI_ORB_BACKEND`。只构建 CPU 版本时使用 MSBuild 参数 `/p:CgmliCudaOrb=false`。`[Timing][Extract]` 的 `backend` 和 `gpu_*_ms` 分别记录实际执行路径和设备阶段耗时，四目总耗时看 `[Timing][ExtractWall]`。
+
+CUDA 提取默认在候选回传后立即提交积分图，四路使用各自的 stream，CPU 同时执行几何筛选和配额分配。将 `frontend_parameters.orb_cuda_early_integral` 设为 `false` 可在描述阶段按实际使用的金字塔层提交积分图，用于对照。
+
+将 `frontend_parameters.orb_cuda_matcher` 设为 `true` 可试用时序与地图引导匹配的 GPU 路径。GPU 遍历候选、检查几何、计算 Hamming 距离并归约双向前两名，CPU 应用原有比例检验和轨迹归属规则。GPU 不可用、计算失败或候选接近几何门限时回到 CPU。`[Timing][Frontend]` 的 `cuda_jobs` 记录实际在 GPU 完成的任务数。
+
+CUDA 匹配将每个任务的引导数据打包到一块页锁定缓冲，跨帧按描述子内容复用显存。通过几何筛选的候选进入有容量上限的稀疏列表，超过容量时由 CPU 完成该任务。双向归约先找最优，再排除同一身份找次优。健康跟踪中，可在两路相机的地图及时序支持均充足时延后其同帧匹配，覆盖不足、恢复和关键帧仍可执行完整搜索。
 
 ## 检查
 

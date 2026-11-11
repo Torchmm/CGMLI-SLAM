@@ -146,7 +146,7 @@ imu_parameters:
   max_sample_gap: 0.05
 
 frontend_parameters:
-  max_num_keypoints: 800
+  max_num_keypoints: 300
   # S2 parallax and accumulated motion drive keyframes; low pixel coverage alone
   # must not evict the oldest mature anchors during a stationary interval.
   keyframe_parallax: 0.015
@@ -162,8 +162,8 @@ frontend_parameters:
   orb_scale_factor: 1.2
   orb_fast_threshold: 20
   # Shared high-threshold scans + selective low-threshold ROI fallback; false selects the ROI reference.
-  max_promotions_per_frame: 200
-  max_active_initialized: 1000
+  max_promotions_per_frame: 100
+  max_active_initialized: 600
   orb_layer_fast: true
   # Whole-layer raw FAST reference: strip scans regressed in the previous replay.
   orb_boundary_fast: false
@@ -176,6 +176,10 @@ frontend_parameters:
   pose_adaptive_ransac: true
   # Map first, recent-frame/stereo seeds, then broaden if support/motion requires it.
   orb_staged_matching: true
+  # Experimental CUDA guided temporal and map matching.
+  orb_cuda_matcher: true
+  # Submit CUDA integral images while the CPU filters and balances keypoints.
+  orb_cuda_early_integral: true
   # All accepted frames keep new tracks; only stable, supported seeds gain rho.
   require_keyframe_anchor_for_promotion: true
   max_tracking_seeds: 1000 # Whole rig; separate from optimized landmark admission.
@@ -197,7 +201,7 @@ estimator_parameters:
   enforce_realtime: true
   realtime_min_iterations: 2
   realtime_max_iterations: 8
-  realtime_time_limit: 0.04 # 40 ms for Ceres across initial solve + outlier refits; soft minimum-iteration limit.
+  realtime_time_limit: 0.04 # 40 ms of nonlinear solve time across the initial pass and outlier refits.
   realtime_num_threads: 4
   # Kept valid if global processing is explicitly enabled later.
   full_graph_iterations: 30
@@ -206,6 +210,10 @@ estimator_parameters:
   backend_max_retries: 1
   visual_nis_threshold: 9.210340371976184
   skip_pre_nis_when_tracking_healthy: true # Keep the full post-solve gate before marginalization.
+  lightweight_non_keyframes: true # Refine the two newest poses and velocities before removing the penultimate frame.
+  # When enabled, fall back to a full solve if the newest IMU edge has post-solve NIS above 60.
+  lightweight_new_imu_nis_gate: false
+  max_consecutive_lightweight_frames: 10 # Run a full solve after this many consecutive lightweight solves. 0 disables them.
   parallel_marginalization_accumulation: true # Use bounded thread-local normal equations on larger systems.
   max_imu_interval_seconds: 10.0
   incremental_imu: true
@@ -213,14 +221,16 @@ estimator_parameters:
   # Small state separator: compare with false (SPARSE_SCHUR) on the same input.
   backend_dense_schur: true
   cache_visual_pairs: true
+  # cpu, cuda (legacy), hybrid (CPU trial cost), schur (experimental), or audit.
+  backend_visual_batch: "cpu" # Lowest backend latency in the GTX 1050 Ti replay comparison.
   max_visual_imu_rotation_error: 0.2
   max_visual_imu_position_error: 0.5
   max_visual_imu_position_error_rate: 2.0
 
 output_parameters:
   # Master switch for feature/match/reprojection debug views; disabled for normal runs.
-  display_matches: false
-  display_overhead: false
+  display_matches: true
+  display_overhead: true
 
 # Reference only: intentionally NOT an active `lidar:` block. The current VIO
 # reader ignores this block, and the offline application reads LiDAR without fusion.

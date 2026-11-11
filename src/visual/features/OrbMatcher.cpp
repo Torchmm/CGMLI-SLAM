@@ -11,6 +11,9 @@
 #include <map>
 #include <limits>
 #include <numeric>
+#ifdef CGMLI_ENABLE_CUDA_ORB
+#include "OrbMatchCuda.hpp"
+#endif
 
 namespace cgmli {
     namespace features {
@@ -294,7 +297,109 @@ namespace cgmli {
             const auto& trainOctaves=filterTrain?filteredOctaves:index.octaves;
             if(statistics) statistics->setupMs=milliseconds(setupStarted);
             const auto traversalStarted=std::chrono::steady_clock::now();
-            for (int i = 0; i < query.rows; ++i) {
+            bool usedCuda=false;
+#ifdef CGMLI_ENABLE_CUDA_ORB
+            if(guidance.cudaSession && std::size_t(groupCount)*train.rows<=8000000 &&
+                std::size_t(query.rows)*train.rows<=50000000) {
+                detail::OrbCudaMatchInput input;
+                input.queryWords=&wordsQ; input.trainWords=&wordsT;
+                input.deviceQuery=guidance.deviceQuery; input.deviceTrain=guidance.deviceTrain;
+                input.cacheQuery=guidance.queryWords && !guidance.queryIdentities;
+                input.cacheTrain=guidance.trainWords!=nullptr;
+                input.geometry=guidance.useSphericalGeometry; input.rotationOnly=rotationOnly;
+                input.reverse=options_.mutualCheck; input.owned=input.reverse && !ownedReverse.empty();
+                input.groups=groupCount; input.gridColumns=columns;
+                input.maxOctaveDifference=options_.maxOctaveDifference;
+                input.radiusSquared=radiusSquared; input.sineThreshold=sineThreshold; input.cosineThreshold=cosineThreshold;
+                input.priorities=priorities;
+                input.gridOffsets.push_back(0);
+                for(const auto& bucket:grid) {
+                    input.gridEntries.insert(input.gridEntries.end(),bucket.begin(),bucket.end());
+                    input.gridOffsets.push_back(int(input.gridEntries.size()));
+                }
+                std::map<int,int> octaveOffsets;
+                for(const auto& bucket:trainOctaves) {
+                    octaveOffsets[bucket.first]=int(input.octaveEntries.size());
+                    input.octaveEntries.insert(input.octaveEntries.end(),bucket.second.begin(),bucket.second.end());
+                }
+                if(!guidance.allowedPairs.empty()) {
+                    input.allowed.reserve(std::size_t(query.rows)*train.rows);
+                    for(int i=0;i<query.rows;++i) {
+                        const auto* row=guidance.allowedPairs.ptr<uchar>(i);
+                        input.allowed.insert(input.allowed.end(),row,row+train.rows);
+                    }
+                }
+                input.train.resize(train.rows);
+                for(int j=0;j<train.rows;++j) if(validT[j]) {
+                    auto& output=input.train[j];
+                    output.x=trainPoints[j].pt.x; output.y=trainPoints[j].pt.y; output.octave=trainPoints[j].octave;
+                    if(input.geometry) std::copy_n(bearingsT[j].data(),3,output.bearing);
+                    output.planeNorm=trainPlaneNorm[j];
+                }
+                input.queries.resize(query.rows);
+                std::uint64_t predictedCount=0,unpredictedCount=0,ownedCount=0;
+                const auto octaveOffset=[&](const auto& it) {
+                    return it==octaveOffsets.end()?int(input.octaveEntries.size()):it->second;
+                };
+                for(int i=0;i<query.rows;++i) {
+                    if(!validQ[i]) continue;
+                    auto& q=input.queries[i];
+                    q.predicted=!guidance.predictedTrainPixels.empty() &&
+                        std::isfinite(guidance.predictedTrainPixels[i].x) && std::isfinite(guidance.predictedTrainPixels[i].y);
+                    if(!guidance.predictedTrainPixels.empty() && !q.predicted && !guidance.allowUnpredictedQueries) continue;
+                    if(q.predicted) ++predictedCount; else ++unpredictedCount;
+                    if(priorities[groups[i]]) ++ownedCount;
+                    if(input.geometry) {
+                        const Eigen::Vector3d rotated=guidance.T_train_query.C()*bearingsQ[i];
+                        const Eigen::Vector3d direction=rotationOnly?rotated:translation.cross(rotated).eval();
+                        if(!rotationOnly) { q.planeNorm=direction.norm(); if(q.planeNorm<1e-12) continue; }
+                        std::copy_n(direction.data(),3,q.direction);
+                    }
+                    q.group=groups[i]; q.octave=queryPoints[i].octave;
+                    q.useGrid=q.predicted && !grid.empty();
+                    if(q.predicted) {
+                        const auto p=guidance.predictedTrainPixels[i];
+                        q.predictedX=p.x; q.predictedY=p.y;
+                        if(q.useGrid) {
+                            const double radius=guidance.searchRadiusPixels;
+                            const auto cell=[&](double coordinate,int limit) {
+                                return int(std::clamp(std::floor(coordinate/cellSize),0.0,double(limit-1)));
+                            };
+                            q.minX=cell(p.x-radius,columns); q.maxX=cell(p.x+radius,columns);
+                            q.minY=cell(p.y-radius,rows); q.maxY=cell(p.y+radius,rows);
+                        }
+                    }
+                    if(!q.useGrid) {
+                        if(options_.maxOctaveDifference>=0) {
+                            const auto lo=static_cast<long long>(q.octave)-options_.maxOctaveDifference;
+                            const auto hi=static_cast<long long>(q.octave)+options_.maxOctaveDifference;
+                            const auto lower=octaveOffsets.lower_bound(int(std::max(lo,static_cast<long long>(std::numeric_limits<int>::min()))));
+                            const auto upper=hi>=std::numeric_limits<int>::max()?octaveOffsets.end():octaveOffsets.upper_bound(int(hi));
+                            q.first=octaveOffset(lower); q.last=octaveOffset(upper);
+                        } else q.last=int(input.octaveEntries.size());
+                    }
+                }
+                detail::OrbCudaMatchOutput output;
+                usedCuda=guidance.cudaSession->match(input,output);
+                if(usedCuda) {
+                    const auto assign=[](const auto& from,auto& to) {
+                        for(std::size_t i=0;i<from.size();++i) for(int k=0;k<2;++k) {
+                            to[i].index[k]=from[i].index[k]; to[i].distance[k]=from[i].distance[k];
+                        }
+                    };
+                    assign(output.forward,forward); assign(output.reverse,reverse); assign(output.owned,ownedReverse);
+                    for(int i=0;i<groupCount;++i) representatives[i]=output.forward[i].representative;
+                    if(statistics) {
+                        statistics->usedCuda=true; statistics->candidatePairs=output.candidatePairs;
+                        statistics->residentDescriptorSets=output.residentDescriptorSets;
+                        statistics->descriptorComparisons=output.descriptorComparisons;
+                        statistics->predictedQueries=predictedCount; statistics->unpredictedQueries=unpredictedCount;
+                        statistics->ownedQueries=ownedCount;
+                    }
+                }
+            }
+#endif
+            if(!usedCuda) for (int i = 0; i < query.rows; ++i) {
                 if (!validQ[i]) continue;
                 const bool predicted=!guidance.predictedTrainPixels.empty()
                     && std::isfinite(guidance.predictedTrainPixels[i].x) && std::isfinite(guidance.predictedTrainPixels[i].y);

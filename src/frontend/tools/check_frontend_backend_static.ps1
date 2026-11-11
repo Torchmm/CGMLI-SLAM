@@ -129,7 +129,8 @@ $contracts=@(
     @('map reliability is target-camera local','src/frontend/FrontendAssociation.cpp','if\(mapReady\[t\]\)'),
     @('partial camera coverage has regression source','src/frontend/tests/FrontendBackendRegression.cpp','local.seedJobs<complete.seedJobs'),
     @('failed staged consensus retries full matching before commit','src/frontend/Frontend.cpp','if\(!accepted&&plan.stagedUsed\)'),
-    @('pose retry reconstructs an isolated proposal','src/frontend/Frontend.cpp','options.stagedMatching=false;constautoretryStarted='),
+    @('pose retry reconstructs an isolated proposal','src/frontend/Frontend.cpp','complete.stagedMatching=false;plan=retryProposal\(complete\);'),
+    @('pose retry uses frozen input to build a fresh plan','src/frontend/Frontend.cpp','autoretry=frontend_association::propose\(estimator,retryOptions,framesInOut\.get\(\)\);'),
     @('frontend returns committed status separately from tracking','src/frontend/Frontend.hpp','boolcommitted=false,trackingAccepted=false,metricPose=false;')
 )
 foreach($entry in $contracts) {

@@ -1,9 +1,121 @@
 #include "WindowVisualFactor.hpp"
+#include "VisualSphereBatchMath.hpp"
 #include <algorithm>
 #include <cmath>
 #include <chrono>
 
 namespace cgmli { namespace backend {
+struct VisualEvaluationCache::Batch {
+    VisualBatchMode mode=VisualBatchMode::Reference;
+    std::vector<detail::VisualBatchInput> inputs;
+    std::map<const double*,int> offsets;
+    std::vector<std::pair<const double*,int>> parameters;
+    std::vector<double> values;
+    std::vector<detail::VisualBatchResidual> residuals;
+    std::vector<double> jacobians;
+    std::size_t jacobianSize=0;
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    std::shared_ptr<detail::VisualCudaWorkspace> workspace;
+    std::unique_lock<std::mutex> lease;
+    std::unique_ptr<detail::VisualCudaBatch> localGpu;
+    detail::VisualCudaBatch* gpu=nullptr;
+    detail::VisualBatchView gpuResults;
+#endif
+    bool topologyChanged=true,ready=false,derivatives=false;
+};
+
+VisualEvaluationCache::VisualEvaluationCache()=default;
+VisualEvaluationCache::~VisualEvaluationCache()=default;
+void VisualEvaluationCache::configureBatch(VisualBatchMode mode,const std::shared_ptr<detail::VisualCudaWorkspace>& workspace) {
+    if(mode==VisualBatchMode::Reference) return;
+    batch_=std::make_unique<Batch>();
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    if(workspace) {
+        batch_->workspace=workspace;
+        batch_->lease=std::unique_lock<std::mutex>(workspace->mutex,std::try_to_lock);
+    }
+#else
+    (void)workspace;
+#endif
+    setBatchMode(mode==VisualBatchMode::Audit?VisualBatchMode::Reference:mode);
+}
+void VisualEvaluationCache::setBatchMode(VisualBatchMode mode) {
+    if(batch_ && batch_->mode!=mode) { batch_->mode=mode; batch_->ready=false; }
+}
+std::size_t VisualEvaluationCache::bindBatch(detail::VisualBatchInput input,const std::vector<const double*>& parameters) {
+    if(!batch_ || parameters.size()!=std::size_t(input.blocks)) return std::size_t(-1);
+    input.jacobianOffset=int(batch_->jacobianSize);
+    for(int i=0;i<input.blocks;++i) {
+        const auto inserted=batch_->offsets.try_emplace(parameters[i],int(batch_->values.size()));
+        if(inserted.second) {
+            batch_->parameters.emplace_back(parameters[i],input.sizes[i]);
+            batch_->values.resize(batch_->values.size()+input.sizes[i]);
+        }
+        input.offsets[i]=inserted.first->second;
+        if(input.derivativeMask & (1u<<i)) input.jacobianSize+=2*input.sizes[i];
+    }
+    batch_->jacobianSize+=input.jacobianSize;
+    const auto index=batch_->inputs.size();
+    batch_->inputs.push_back(input);
+    batch_->topologyChanged=true; batch_->ready=false;
+    return index;
+}
+const detail::VisualBatchResidual* VisualEvaluationCache::batchResult(std::size_t index,
+    const double** jacobians) const {
+    if(!batch_ || !batch_->ready || index>=batch_->inputs.size()) return nullptr;
+    if(jacobians && !batch_->derivatives) return nullptr;
+    const auto* rows=batch_->residuals.data();
+    const auto* values=batch_->jacobians.data();
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    if(batch_->mode!=VisualBatchMode::Host) {
+        rows=batch_->gpuResults.residuals;
+        values=batch_->gpuResults.jacobians;
+    }
+#endif
+    if(jacobians) *jacobians=batch_->inputs[index].jacobianSize?
+        values+batch_->inputs[index].jacobianOffset:nullptr;
+    return &rows[index];
+}
+std::size_t VisualEvaluationCache::batchFactors() const { return batch_?batch_->inputs.size():0; }
+bool VisualEvaluationCache::auditDirectNormal(const std::vector<detail::DirectVisualLayout>& layout,
+    const std::vector<double>& plus,const std::vector<int>& retained,const std::vector<int>& eliminated,
+    detail::VisualNormalSystem& out) const {
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    return batch_ && batch_->mode==VisualBatchMode::Cuda && batch_->ready && batch_->derivatives && batch_->gpu &&
+        batch_->gpu->directNormal(batch_->inputs,layout,plus,retained,eliminated,out);
+#else
+    (void)layout; (void)plus; (void)retained; (void)eliminated; (void)out;
+    return false;
+#endif
+}
+
+detail::VisualCudaBatch* VisualEvaluationCache::linearizeSchur(const std::vector<detail::DirectVisualLayout>& layout,
+    const std::vector<double>& plus,int retained,int ranges,bool newTopology) {
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    if(!batch_ || batch_->inputs.size()!=layout.size()) return nullptr;
+    auto& batch=*batch_;
+    if(!batch.gpu) {
+        auto& storage=batch.lease.owns_lock()?batch.workspace->batch:batch.localGpu;
+        if(!storage) storage=std::make_unique<detail::VisualCudaBatch>();
+        batch.gpu=storage.get();
+    }
+    std::size_t offset=0;
+    for(const auto& p:batch.parameters) {
+        std::copy_n(p.first,p.second,batch.values.data()+offset);
+        offset+=p.second;
+    }
+    // Direct evaluation owns its device data. Force Ceres to repack if the
+    // online solver falls back, including after an incomplete CUDA upload.
+    batch.topologyChanged=true;
+    batch.ready=false;
+    return batch.gpu->linearizeSchur(batch.inputs,batch.values,batch.jacobianSize,layout,plus,retained,
+        ranges,newTopology)?batch.gpu:nullptr;
+#else
+    (void)layout; (void)plus; (void)retained; (void)ranges; (void)newTopology;
+    return nullptr;
+#endif
+}
+
 namespace {
 VisualTimedBearing evaluateTimedBearing(const Eigen::Vector3d& bearing,const Eigen::Vector3d& velocity,
     double reference,double td,bool derivative) {
@@ -128,6 +240,61 @@ void VisualEvaluationCache::PrepareForEvaluation(bool evaluateJacobians,bool new
         }
         timedAnchorPrepareMs+=ms(start);
     }
+    if(!batch_ || batch_->inputs.empty() || batch_->mode==VisualBatchMode::Reference) return;
+    auto& batch=*batch_;
+    if(batch.ready && !newPoint && (!evaluateJacobians || batch.derivatives)) return;
+    if(!evaluateJacobians && (batch.mode==VisualBatchMode::Hybrid || batch.mode==VisualBatchMode::Schur)) {
+        // A trial point only needs the cost. Let Ceres evaluate its cached
+        // CPU factors in parallel and invalidate any rows for the old point.
+        batch.ready=false;
+        ++batchCpuTrials;
+        return;
+    }
+    const auto start=std::chrono::steady_clock::now();
+    std::size_t offset=0;
+    for(const auto& p:batch.parameters) {
+        std::copy_n(p.first,p.second,batch.values.data()+offset);
+        offset+=p.second;
+    }
+    batch.derivatives=evaluateJacobians;
+    batch.ready=false;
+    const detail::VisualBatchResidual* rows=nullptr;
+    ++batchEvaluations;
+    if(batch.mode==VisualBatchMode::Host) {
+        batch.residuals.resize(batch.inputs.size());
+        if(evaluateJacobians) batch.jacobians.resize(batch.jacobianSize);
+        for(std::size_t i=0;i<batch.inputs.size();++i) {
+            auto& r=batch.residuals[i];
+            const auto& in=batch.inputs[i];
+            r.valid=detail::sphere_batch::evaluate(in,batch.values.data(),r.value,
+                evaluateJacobians && in.jacobianSize?batch.jacobians.data()+in.jacobianOffset:nullptr);
+        }
+        batch.ready=true;
+        rows=batch.residuals.data();
+    }
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    else {
+        if(!batch.gpu) {
+            auto& storage=batch.lease.owns_lock()?batch.workspace->batch:batch.localGpu;
+            if(!storage) storage=std::make_unique<detail::VisualCudaBatch>();
+            batch.gpu=storage.get();
+        }
+        batch.ready=batch.gpu->evaluate(batch.inputs,batch.values,batch.topologyChanged,evaluateJacobians,batch.jacobianSize,
+            batch.gpuResults);
+        if(batch.ready) {
+            rows=batch.gpuResults.residuals;
+            batch.topologyChanged=false;
+            if(evaluateJacobians) {
+                batchJacobianBytes+=batch.jacobianSize*sizeof(double);
+                batchDenseJacobianBytes+=batch.inputs.size()*46*sizeof(double);
+            }
+        }
+    }
+#endif
+    if(!batch.ready) { ++batchFailures; batch.mode=VisualBatchMode::Reference; }
+    else batchInvalid+=int(std::count_if(rows,rows+batch.inputs.size(),
+        [](const auto& r){return !r.valid;}));
+    batchMs+=ms(start);
 }
 Eigen::Matrix<double,3,2> sphereBasis(const Eigen::Vector3d& b) {
     const Eigen::Vector3d axis=std::abs(b.x())<0.8?Eigen::Vector3d::UnitX():Eigen::Vector3d::UnitY();
@@ -145,6 +312,7 @@ kinematics::Transformation pose(const double* x) {
 }
 class CacheableSphereCost : public ::ceres::CostFunction {
 public:
+    virtual bool packBatch(detail::VisualBatchInput&,unsigned) const=0;
     virtual bool EvaluateCached(double const* const*,double*,double**,
         const std::vector<const VisualPoseCacheValue*>*,const VisualPairCacheValue* = nullptr,
         const VisualTimedBearing* = nullptr,const VisualTimedObserver* = nullptr) const=0;
@@ -154,6 +322,27 @@ public:
 };
 class InverseDepthSphereCost final : public CacheableSphereCost {
 public:
+    bool packBatch(detail::VisualBatchInput& in,unsigned derivativeMask) const override {
+        if(!analytic_) return false;
+        in.blocks=int(parameter_block_sizes().size()); in.observer=observerPose_;
+        in.extrinsic=extrinsic_; in.time=timeOffset_; in.range=inverseDepth_;
+        in.derivativeMask=derivativeMask;
+        for(int i=0;i<in.blocks;++i) in.sizes[i]=parameter_block_sizes()[i];
+        const auto vector=[](const Eigen::Vector3d& value,double* output) {
+            Eigen::Map<Eigen::Vector3d> mapped(output);
+            mapped=value;
+        };
+        vector(anchorBearing_,in.anchor); vector(observation_.bearing,in.measured);
+        vector(anchorStatic_,in.anchorStatic); vector(observationStatic_,in.measuredStatic);
+        vector(anchor_.bearingVelocity,in.anchorVelocity); vector(observation_.bearingVelocity,in.measuredVelocity);
+        vector(tca_,in.anchorTranslation); vector(tcb_,in.measuredTranslation);
+        Eigen::Map<detail::sphere_batch::R3> ca(in.anchorRotation),cb(in.measuredRotation);
+        Eigen::Map<detail::sphere_batch::R23> projection(in.measurement);
+        ca=Rca_; cb=Rcb_; projection=measurement_;
+        in.anchorTime=anchor_.referenceTimeOffset; in.measuredTime=observation_.referenceTimeOffset;
+        in.movingAnchor=movingAnchor_; in.movingMeasured=movingObservation_;
+        return true;
+    }
     const VisualPairCacheValue* bindPair(const std::vector<const double*>& p,VisualEvaluationCache& cache) const override {
         return observerPose_==0?nullptr:cache.bindPair(p[0],p[observerPose_],p[extrinsic_],T_RCa_,T_RCb_);
     }
@@ -410,20 +599,43 @@ private:
 class CachedSphereAdapter final : public ::ceres::CostFunction {
 public:
     CachedSphereAdapter(const CacheableSphereCost& cost,const std::vector<const double*>& parameters,
-        VisualEvaluationCache& cache,bool cachePairs,bool fixedTime)
-        :cost_(cost) {
+        VisualEvaluationCache& cache,bool cachePairs,bool fixedTime,unsigned derivativeMask)
+        :cost_(cost),cache_(cache),derivativeMask_(derivativeMask) {
         *mutable_parameter_block_sizes()=cost.parameter_block_sizes(); set_num_residuals(cost.num_residuals());
         poses_.resize(parameters.size(),nullptr);
         for(size_t i=0;i<parameters.size();++i) if(parameter_block_sizes()[i]==7) poses_[i]=cache.bind(parameters[i]);
         if(cachePairs) pair_=cost.bindPair(parameters,cache);
         anchorTime_=cost.bindTimedAnchor(parameters,cache,fixedTime);
         if(fixedTime) observerTime_=cost.fixedObserver(parameters);
+        if(cache.hasBatch()) {
+            detail::VisualBatchInput input;
+            if(cost.packBatch(input,derivativeMask)) batchIndex_=cache.bindBatch(input,parameters);
+        }
     }
     bool Evaluate(double const* const* p,double* r,double** J) const override {
+        const double* jacobians=nullptr;
+        const auto* result=batchIndex_==std::size_t(-1)?nullptr:cache_.batchResult(batchIndex_,J?&jacobians:nullptr);
+        if(result && result->valid) {
+            int offset=0;
+            if(J) for(std::size_t i=0;i<parameter_block_sizes().size();++i) {
+                if(!(derivativeMask_&(1u<<i))) {
+                    if(J[i]) return cost_.EvaluateCached(p,r,J,&poses_,pair_,anchorTime_,observerTime_?&*observerTime_:nullptr);
+                    continue;
+                }
+                const int width=2*parameter_block_sizes()[i];
+                if(J[i]) std::copy_n(jacobians+offset,width,J[i]);
+                offset+=width;
+            }
+            std::copy_n(result->value,2,r);
+            return true;
+        }
         return cost_.EvaluateCached(p,r,J,&poses_,pair_,anchorTime_,observerTime_?&*observerTime_:nullptr);
     }
 private:
     const CacheableSphereCost& cost_; std::vector<const VisualPoseCacheValue*> poses_;
+    const VisualEvaluationCache& cache_;
+    std::size_t batchIndex_=std::size_t(-1);
+    unsigned derivativeMask_;
     const VisualPairCacheValue* pair_=nullptr;
     const VisualTimedBearing* anchorTime_=nullptr;
     std::optional<VisualTimedObserver> observerTime_;
@@ -431,10 +643,10 @@ private:
 }
 std::unique_ptr<::ceres::CostFunction> cacheWindowVisualCost(const ::ceres::CostFunction& cost,
     const std::vector<const double*>& parameters,VisualEvaluationCache& cache,bool cachePairs,
-    bool fixedTime) {
+    bool fixedTime,unsigned derivativeMask) {
     const auto* sphere=dynamic_cast<const CacheableSphereCost*>(&cost);
     if(!sphere || parameters.size()!=cost.parameter_block_sizes().size()) return {};
-    return std::make_unique<CachedSphereAdapter>(*sphere,parameters,cache,cachePairs,fixedTime);
+    return std::make_unique<CachedSphereAdapter>(*sphere,parameters,cache,cachePairs,fixedTime,derivativeMask);
 }
 bool makeWindowVisualFactor(const WindowLandmark& landmark,const WindowObservation& anchor,
     const WindowObservation& observation,const FrameStore& frames,const BackendGraph& graph,

@@ -36,6 +36,14 @@ namespace cgmli {
                     }
                     return result;
                 }
+                void reset() {
+                    for(auto& s:slots) {
+                        s.jacobianNs.store(0,std::memory_order_relaxed);
+                        s.residualNs.store(0,std::memory_order_relaxed);
+                        s.jacobianCalls.store(0,std::memory_order_relaxed);
+                        s.residualCalls.store(0,std::memory_order_relaxed);
+                    }
+                }
             };
             // Per-solve adapter, never installed in the graph or a checkpoint.
             // Cost ownership/whitening and all Jacobian requests pass through.
@@ -81,13 +89,13 @@ namespace cgmli {
                 for (const auto& k : f.keys) p.push_back(graph.blocks.at(k).value.data());
                 return problem.AddResidualBlock(profiled?profiled:f.cost.get(), f.loss.get(), p);
             }
-            inline void addPrior(::ceres::Problem& problem, BackendGraph& graph,::ceres::CostFunction* profiled=nullptr) {
+            inline ::ceres::ResidualBlockId addPrior(::ceres::Problem& problem, BackendGraph& graph,::ceres::CostFunction* profiled=nullptr) {
                 // This cost already represents historical robustified/whitened information.
                 // Applying a new robust loss would alter previously accepted evidence a second time.
-                if (!graph.prior) return;
+                if (!graph.prior) return nullptr;
                 std::vector<double*> p;
                 for (const auto& k : graph.prior->keys()) p.push_back(graph.blocks.at(k).value.data());
-                problem.AddResidualBlock(profiled?profiled:graph.prior.get(), nullptr, p);
+                return problem.AddResidualBlock(profiled?profiled:graph.prior.get(), nullptr, p);
             }
             struct SolveWorkspace {
                 std::array<EvaluationCounters,5> counters;
@@ -95,6 +103,7 @@ namespace cgmli {
                 std::vector<std::unique_ptr<::ceres::CostFunction>> adapters;
                 using RigRotationManifold = ::ceres::ProductManifold<::ceres::SubsetManifold, LeftSO3Manifold>;
                 std::unique_ptr<RigRotationManifold> rigRotationManifold;
+                std::unique_ptr<::ceres::SubsetManifold> velocityManifold;
                 // Problem dies before its borrowed adapters/counters.
                 std::unique_ptr<::ceres::Problem> problem;
                 SolveWorkspace() {
@@ -102,6 +111,7 @@ namespace cgmli {
                     problem=std::make_unique<::ceres::Problem>(options);
                 }
                 std::map<FactorId,::ceres::ResidualBlockId> residuals;
+                ::ceres::ResidualBlockId priorResidual=nullptr;
                 std::set<BlockKey> used;
                 bool built=false,schur=false,hasPrior=false;
             };

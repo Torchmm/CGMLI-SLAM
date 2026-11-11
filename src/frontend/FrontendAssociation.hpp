@@ -15,6 +15,7 @@ namespace cgmli { namespace frontend_association {
 struct Options {
     size_t maxSourceFrames=4, maxNewLandmarks=200;
     size_t matchingThreads=1;
+    bool useCudaMatcher=false;
     size_t maxPromotionsPerFrame=40,maxActiveInitialized=1000; ///< Zero disables each healthy-tracking budget.
     size_t maxTrackingSeeds=1000; ///< Admission ceiling for unoptimized identities; zero disables it.
     double seedMaxUntrackedSeconds=0.5; ///< Age of the last real observation; zero disables expiry.
@@ -28,6 +29,7 @@ struct Options {
     features::OrbMatcherOptions matcher;
     bool collectDebugMatches=false; // Preserve actual candidate pairs only when visualization is enabled.
     bool stagedMatching=true; ///< Map first, recent/stereo seeds, target-local expansion, then full pose fallback.
+    bool deferHealthyStereo=false; ///< Check recent temporal and map support before launching stereo.
     size_t mapDescriptorsPerLandmark=3, minimumStageMatchesPerCamera=40;
     void validate() const;
 };
@@ -41,7 +43,7 @@ struct Plan {
     std::vector<FeatureMatchDebug> debugMatches;
     double preparationMs=0, matchingMs=0, assignmentMs=0;
     uint64_t candidatePairs=0, descriptorComparisons=0;
-    size_t matchingJobs=0;
+    size_t matchingJobs=0,cudaMatchingJobs=0,residentDescriptorSets=0;
     std::map<LandmarkId,Eigen::Vector3d> finitePoints; ///< One coordinate evaluation per proposal.
     size_t admittedTrackLimit=0, capacitySkipped=0, retiredSeeds=0;
     size_t trackingSeeds=0,seedBudgetSkipped=0,expiredSeeds=0,newSeedCells=0;
@@ -53,6 +55,7 @@ struct Plan {
     uint64_t predictedQueries=0, unpredictedQueries=0;
     size_t mapJobs=0,seedJobs=0;
     size_t expansionJobs=0,broadJobs=0;
+    size_t deferredStereoJobs=0;
     double stageRotationRadians=0;
     std::vector<size_t> stageMapMatches,stagePrimaryMatches,stageExpandedMatches;
     std::vector<size_t> stagePrimaryExistingMatches,stageExpandedExistingMatches;
@@ -77,7 +80,9 @@ KeyframeDecision decideKeyframe(const Estimator& estimator,const MultiFrame& cur
 /// The caller must extract before addStates(): frozen backend indices are immutable.
 bool sameMeasurements(const MultiFrame& input,const MultiFrame& frozen);
 /// No mutations, no optimization, no triangulation from a unit-baseline pose.
-Plan propose(const Estimator& estimator,const Options& options);
+// descriptorSource is the transient current frame after sameMeasurements()
+// verified that its descriptor row order matches the frozen backend copy.
+Plan propose(const Estimator& estimator,const Options& options,const MultiFrame* descriptorSource=nullptr);
 /// Reject only proposed current observations; prune orphaned newly created tracks.
 /// Existing backend observations are never deleted or relabelled by this operation.
 void reject(Plan& plan,const std::set<KeypointIdentifier>& keys);

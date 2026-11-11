@@ -2,6 +2,16 @@
 
 本目录使用 C++17、Eigen 3.4、Ceres 2.2，实现滑窗数据管理、因子图优化和边缘化。当前窗口已经管理帧、地标、观测与因子，项目入口为 `cgmli::ViSlamBackend`。传感器预积分、LiDAR 因子及 pipeline 调度仍需接入。
 
+## CUDA 视觉批量求值
+
+`estimator_parameters.backend_visual_batch` 默认是 `cpu`。在 CUDA 构建中设为 `cuda` 后，Ceres 的求值回调批量计算双精度球面残差和解析雅可比。窗口拓扑在一次求解的多次试探点之间复用。GPU 仅回传可变参数块的雅可比，`[VisualBatchSolve]` 记录回传字节数。Ceres 管理鲁棒损失、流形、线性求解和步长，GPU 求值失败时回到 CPU 因子。
+
+`hybrid` 模式保留 Ceres 优化器和 CUDA 雅可比批处理。仅计算残差的试探点由 Ceres 并行求值 CPU 球面因子。`[VisualBatchSolve]` 的 `cpu_trials` 记录走 CPU 的试探点。
+
+`schur` 是实验模式。首轮完整求解用 GPU 累计视觉正规方程并消去独立逆距离，CPU 合入 IMU、标定和边缘化先验后求解约化系统。压缩后的逆距离块随约化矩阵一并回传，CPU 据此回代并用带损失的 CPU 因子验收试探步。遇到非视觉因子连接自由逆距离、无效步或数值失败时回退 Ceres。外点 refit 和整帧重试也使用 Ceres 的混合路径。`[OnlineSchur]` 记录尝试耗时和回退原因。
+
+将 `estimator_parameters.backend_visual_batch` 设为 `audit` 后，每 30 帧对同一窗口比较原有 Ceres 求值、主机批量求值和 CUDA 批量求值。`[VisualBatchAudit]` 记录白化残差、切空间雅可比、完整窗口的 `JᵀJ` 和 `Jᵀr`，以及独立逆距离参数可消元时的阻尼 Schur 约化。审计运行仍使用 Ceres 提交估计。
+
 ## 职责与数据所有权
 
 | 类 / 文件 | 负责内容 |

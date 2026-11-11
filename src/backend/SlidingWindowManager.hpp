@@ -120,6 +120,8 @@ namespace cgmli {
             /// Inspect the penultimate epoch: keyframe -> OLD, otherwise SECOND_NEW.
             /// The newest epoch is retained in either policy.
             MarginalizationPolicy choosePolicy() const;
+            /// True when the two newest epochs can be refined before merging the IMU bridge.
+            bool canOptimizeLatestTwo() const;
             /// Predict whether a proposed seed range would be consumed by the next
             /// eviction. Support contains real measured/planned views, not synthetic
             /// constraints. Already absorbed rays cannot trigger a new range's removal.
@@ -150,7 +152,7 @@ namespace cgmli {
             /// Retry queued factors after inserting dependencies or updating health.
             void activatePending();
             /// Release terminal cost/loss ownership after recording a lightweight event.
-            void collectTerminalFactors();
+            void collectTerminalFactors(std::vector<KeypointIdentifier>* rejectedVisual=nullptr);
             void record(const FactorRecord& f);
             bool ready(const FactorRecord& f) const;
             bool healthy(const FactorRecord& f) const;

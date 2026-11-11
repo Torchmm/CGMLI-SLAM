@@ -7,6 +7,7 @@
 #include <factor/ImuError.hpp>
 #include <backend/BackendFactors.hpp>
 #include <backend/FrameStore.hpp>
+#include <backend/ProjectBackendAdapter.hpp>
 #include <limits>
 #include <cameras/PinholeCamera.hpp>
 #include <cameras/EucmCamera.hpp>
@@ -414,6 +415,105 @@ void nativeSecondNewestImuReplay() {
     for(const auto& item:before.factors) require(window.graph().factors.at(item.first).cost==item.second.cost
         && window.graph().factors.at(item.first).imuReplay==item.second.imuReplay,"failed merge keeps original immutable factors");
 }
+void scopedPoseVelocityKeepsWindowAndCalibration() {
+    using namespace backend;
+    const auto p=parameters();
+    const auto data=samples(0.8);
+    BackendOptions options; options.windowSize=2;
+    std::vector<cv::KeyPoint> points;
+    for(int i=0;i<8;++i) points.emplace_back(36.f+22.f*(i%4),36.f+24.f*(i/4),31.f);
+    const auto populate=[&](FixedLagBackend& target,uint64_t gyroBiasStepFrame) {
+        std::string error;
+        require(target.initializeCalibration(makeRigCalibration(p.nCameraSystem,kinematics::Transformation()).parameterBlocks(),error),
+            "scoped calibration setup");
+        StateEstimate previous;
+        for(uint64_t i=1;i<=3;++i) {
+            StateEstimate state; state.id=StateId(i); state.timestamp=timeAt(0.2*double(i));
+            state.visual=SensorHealth::Valid; state.keyframe=i==1;
+            if(i>=2) {
+                const double direction=i==2?-1.0:1.0;
+                state.T_WB.set(Eigen::Vector3d(direction*0.001,0,0),Eigen::Quaterniond::Identity());
+                state.speedBias[0]=direction*0.005;
+            }
+            // A bias step leaves a large residual on just one edge because the local solve holds biases fixed.
+            if(gyroBiasStepFrame && i>=gyroBiasStepFrame) state.speedBias[3]=0.002;
+            MultiFrame frame(p.nCameraSystem,state.timestamp,i);
+            frame.resetKeypoints(0,points);
+            require(target.append(state,frame,data,error),"append scoped fixture");
+            if(i>1) require(target.addFactor(factor::makeBodyImuRecord(data,p.imu,previous,state)).accepted(),"scoped IMU edge");
+            previous=state;
+        }
+        for(size_t i=0;i<points.size();++i) {
+            const LandmarkId id(i+1);
+            require(target.addLandmark(id,{1,0,i},0.25,error),"scoped anchor");
+            require(target.addObservation(id,{2,0,i},error) && target.addObservation(id,{3,0,i},error),"scoped live observations");
+        }
+        require(target.window().canOptimizeLatestTwo(),"eligible two-frame fixture");
+    };
+    FixedLagBackend backend(options);
+    populate(backend,0);
+    const auto before=backend.window().graph();
+    const auto pose=BlockKey::pose(StateId(3)),speed=BlockKey::speedBias(StateId(3));
+    SolveBudget budget; budget.latestTwoPoseVelocityOnly=true;
+    budget.minIterations=1;
+    const auto rejected=backend.step({}, {}, [](const BackendGraph&,std::string& reason) {
+        reason="forced scoped rejection"; return false;
+    }, {}, {}, budget);
+    require(!rejected.accepted && !backend.snapshot() && backend.window().size()==3,
+        "failed scoped solve leaves the same epoch ready for a full retry");
+    for(const auto& item:before.blocks)
+        require((backend.window().graph().blocks.at(item.first).value-item.second.value).norm()==0,"scoped rollback restores all values");
+    for(const auto& item:before.factors)
+        require(backend.window().graph().factors.at(item.first).lifecycle==item.second.lifecycle,"scoped rollback restores factor lifecycle");
+
+    int calibrationRequests=0;
+    const auto accepted=backend.step({},[&](BlockKey,const BackendGraph&) {++calibrationRequests; return true;}, {}, {}, {}, budget);
+    require(accepted.accepted && accepted.solve.effectiveParameters==18 && accepted.solve.linearSolverUsed=="DENSE_QR"
+        && accepted.solve.residualBlocks==2*points.size()+2 && accepted.solve.activeLandmarks==0
+        && accepted.solve.postSolveResiduals[1].factors==2,
+        "scoped problem includes both frames' measurements and 18 free coordinates");
+    require(calibrationRequests==0 && accepted.marginalization &&
+        accepted.marginalization->removed==StateId(2) && accepted.marginalization->replacedImuFactors==2,
+        "scoped solve freezes calibration and still merges IMU on normal eviction");
+    const auto& after=backend.window().graph();
+    for(const auto& item:after.blocks) {
+        const auto& old=before.blocks.at(item.first);
+        if(item.first==pose) continue;
+        const Eigen::VectorXd delta=item.second.value-old.value;
+        require((item.first==speed?delta.tail<6>().norm():delta.norm())==0,"scoped solve changes only pose and velocity");
+    }
+    require((after.blocks.at(pose).value.head<3>()).norm()<0.001 &&
+        std::abs(after.blocks.at(speed).value[0])<0.005,"scoped solve corrects latest pose and velocity");
+    require(accepted.retiredState && accepted.retiredState->id==StateId(2)
+        && accepted.retiredState->T_WB.r().norm()<0.001 && std::abs(accepted.retiredState->speedBias[0])<0.005
+        && (accepted.retiredState->speedBias.tail<6>()-before.blocks.at(BlockKey::speedBias(StateId(2))).value.tail<6>()).norm()==0,
+        "scoped solve corrects penultimate pose and velocity with fixed biases before eviction");
+
+    budget.skipPreNis=true;
+    auto gatedBudget=budget;
+    gatedBudget.gateLightweightNewImuNis=true;
+    FixedLagBackend oldConflict(options);
+    populate(oldConflict,2);
+    const auto oldOnly=oldConflict.step({}, {}, {}, {}, {}, gatedBudget);
+    require(oldOnly.accepted && oldOnly.solve.lightweightOldImu.after>60 && oldOnly.solve.lightweightNewImu.after<=60,
+        "large old-edge NIS is diagnostic when the new edge passes");
+    require(oldOnly.solve.lightweightOldImu.factor!=oldOnly.solve.lightweightNewImu.factor
+        && std::isfinite(oldOnly.solve.lightweightOldImu.before) && std::isfinite(oldOnly.solve.lightweightNewImu.before),
+        "both directed edges report pre-solve NIS even when the general pre-gate is skipped");
+    FixedLagBackend newConflict(options);
+    populate(newConflict,3);
+    const auto gated=newConflict.step({}, {}, {}, {}, {}, gatedBudget);
+    require(!gated.accepted && !newConflict.snapshot() && newConflict.window().size()==3
+        && gated.solve.lightweightNewImu.after>60 && gated.solve.lightweightOldImu.after<=60,
+        "the enabled newest-edge gate rejects the same staged epoch before eviction or publication");
+    const auto newOnly=newConflict.step({}, {}, {}, {}, {}, budget);
+    require(newOnly.accepted && newConflict.snapshot() && newConflict.window().size()==2
+        && newOnly.solve.lightweightNewImu.after>60 && newOnly.solve.lightweightOldImu.after<=60,
+        "large finite new-edge NIS is diagnostic and the scoped solve still commits");
+    require(newOnly.marginalization && newOnly.marginalization->removed==StateId(2)
+        && newOnly.marginalization->replacedImuFactors==2,
+        "scoped solve with large new-edge NIS still evicts and merges the IMU bridge");
+}
 void longImuIntervalsAreStorageOnly() {
     const auto p=parameters(); const auto data=samples(25.0); backend::BackendOptions options;
     options.windowSize=2; options.maxImuSamplesPerEpoch=1600;
@@ -462,7 +562,9 @@ void fractionalIncrementalImuMatchesFullReplay() {
     require(factor::mergeBodyImuRecords(left,right,a,c,1000,merged,error)
         && merged.imuReplay->integrationMode=="incremental","fractional image boundaries use complete-sample prefix cache");
     const auto direct=factor::makeBodyImuRecord(data,p.imu,a,c);
-    Eigen::Matrix<double,7,1> poses[2]; poses[0]=a.T_WB.coeffs(); poses[1]=c.T_WB.coeffs();
+    Eigen::Matrix<double,7,1> poses[2];
+    poses[0]<<a.T_WB.r(),a.T_WB.q().coeffs();
+    poses[1]<<c.T_WB.r(),c.T_WB.q().coeffs();
     const double* x[]{poses[0].data(),a.speedBias.data(),poses[1].data(),c.speedBias.data()};
     factor::BodyImuDiagnostics m,d;
     require(factor::diagnoseBodyImu(*merged.cost,x,m) && factor::diagnoseBodyImu(*direct.cost,x,d),"fractional replay diagnostics");
@@ -769,6 +871,7 @@ void cgmli::debug::registerPipelineCases(std::vector<cgmli::debug::ModuleCase>& 
     cases.push_back({"initialization","averagedImageInputPreservesTimes",[]() { averagedImageInputPreservesTimes(); }});
     cases.push_back({"backend","calibrationRetryFreezesOnlyRejectedBlocks",[]() { calibrationRetryFreezesOnlyRejectedBlocks(); }});
     cases.push_back({"backend","motionCalibrationRespectsTrackSupport",[]() { motionCalibrationRespectsTrackSupport(); }});
+    cases.push_back({"backend","scopedPoseVelocityKeepsWindowAndCalibration",[]() { scopedPoseVelocityKeepsWindowAndCalibration(); }});
     cases.push_back({"initialization","modelSpecificCameraCalibration",[]() { modelSpecificCameraCalibration(); }});
     cases.push_back({"initialization","stationaryInitializationAndAtomicFailure",[]() { stationaryInitializationAndAtomicFailure(); }});
     cases.push_back({"initialization","stationaryPoseEntryRejectsMotion",[]() { stationaryPoseEntryRejectsMotion(); }});
@@ -791,6 +894,7 @@ int main() {
     try { featureDebugSnapshotsAndRendering(); averagedImageInputPreservesTimes(); modelSpecificCameraCalibration(); imuGapAndAtomicPropagation(); inertialPoseAcceptanceBounds();
         calibrationRetryFreezesOnlyRejectedBlocks();
         motionCalibrationRespectsTrackSupport();
+        scopedPoseVelocityKeepsWindowAndCalibration();
         failedSolveRollbackPreservesNextFrame(); imuGapStopsCurrentSegment();
         nativeSecondNewestImuReplay();
         longImuIntervalsAreStorageOnly(); fractionalIncrementalImuMatchesFullReplay();

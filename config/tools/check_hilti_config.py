@@ -126,6 +126,16 @@ def main():
             check(not target.getNode(section).getNode(key).empty(), f"Missing {section}/{key}")
     window = target.getNode("estimator_parameters").getNode("window_size")
     check(window.isInt() and window.real() == 10, "Hilti local window must retain exactly 10 frame states")
+    lightweight_limit = target.getNode("estimator_parameters").getNode("max_consecutive_lightweight_frames")
+    check(lightweight_limit.isInt() and lightweight_limit.real() >= 0,
+          "max_consecutive_lightweight_frames must be a nonnegative integer")
+    new_imu_gate = target.getNode("estimator_parameters").getNode("lightweight_new_imu_nis_gate")
+    check((new_imu_gate.isInt() and new_imu_gate.real() == 0)
+          or (new_imu_gate.isString() and new_imu_gate.string().partition(" ")[0].lower() in {"false", "no", "n", "off"}),
+          "Hilti lightweight_new_imu_nis_gate must default to false")
+    visual_batch = target.getNode("estimator_parameters").getNode("backend_visual_batch")
+    check(visual_batch.isString() and visual_batch.string() in {"cpu", "cuda", "hybrid", "schur", "audit"},
+          "backend_visual_batch must be cpu, cuda, hybrid, schur, or audit")
     for obsolete in ("num_keyframes", "num_imu_frames"):
         check(target.getNode("estimator_parameters").getNode(obsolete).empty(), f"Obsolete window quota remains: {obsolete}")
     pipeline = (ROOT / "src/pipeline/ThreadedSlam.cpp").read_text(encoding="utf-8")

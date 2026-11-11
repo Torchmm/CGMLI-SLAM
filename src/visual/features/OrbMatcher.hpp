@@ -13,6 +13,7 @@ namespace cgmli {
     class Frame;
     class MultiFrame;
     namespace features {
+        namespace detail { class OrbCudaMatcherSession; struct OrbCudaDescriptorRows; }
         using OrbBearings = std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>>;
         using OrbDescriptorWords=std::array<uint64_t,4>;
         using OrbWordRows=std::vector<OrbDescriptorWords>;
@@ -30,6 +31,8 @@ namespace cgmli {
             double setupMs=0, traversalMs=0, selectionMs=0; ///< Per-job elapsed time; traversal includes fused Hamming.
             uint64_t predictedQueries=0, unpredictedQueries=0;
             uint64_t ownedQueries=0,ownedMatches=0,prioritySuppressed=0;
+            bool usedCuda=false;
+            unsigned residentDescriptorSets=0;
         };
         struct OrbMatcherOptions {
             int maxHammingDistance = 64;
@@ -61,6 +64,9 @@ namespace cgmli {
             const OrbWordRows* queryWords=nullptr;
             const OrbWordRows* trainWords=nullptr;
             const OrbTrainIndex* trainIndex=nullptr;
+            // Owned by this proposal. Its input descriptor caches outlive all jobs.
+            detail::OrbCudaMatcherSession* cudaSession=nullptr;
+            std::shared_ptr<const detail::OrbCudaDescriptorRows> deviceQuery,deviceTrain;
             /// Optional landmark identities for pooled map descriptors. Ratio/mutual
             /// neighbors are distinct identities, never two views of the same point.
             const std::vector<uint64_t>* queryIdentities=nullptr;

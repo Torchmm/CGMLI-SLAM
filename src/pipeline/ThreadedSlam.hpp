@@ -157,6 +157,7 @@ private:
     double pendingPredictionSeconds_=0;
     size_t pendingVisualLandmarks_=0;
     int optimizationAttempts_=0;
+    int consecutiveLightweightFrames_=0;
     // Worker-owned stage progress. A failed solve cannot advance either stage.
     unsigned rotationCalibrationUpdates_=0, timeCalibrationUpdates_=0, trackingCalibrationUpdates_=0;
     std::optional<CameraCalibrationDecision> pendingCalibrationRetry_;

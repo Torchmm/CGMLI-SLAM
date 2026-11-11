@@ -141,7 +141,7 @@ $contracts=@(
     @('limited solve prior-cleanup regression is invoked','ManagedWindowRegression.cpp','budgetLimitedSolvePreservesCleanPrior\(\);'),
     @('only completed Ceres time is charged before a refit','BackendOptimizer.cpp','constdoubletimeRemaining=timeLimit-out.ceresMs\*1e-3;'),
     @('minimum-iteration callback shares previous Ceres calls','BackendOptimizer.cpp','returnout.ceresMs\*1e-3\+std::chrono::duration<double>'),
-    @('Ceres stopwatch starts immediately before Solve','BackendOptimizer.cpp','solveStarted=std::chrono::steady_clock::now\(\);::ceres::Solve\('),
+    @('Solver stopwatch spans online Schur and Ceres fallback','BackendOptimizer.cpp','solveStarted=std::chrono::steady_clock::now\(\);boolnativeSchur=false;[\s\S]*?if\(!nativeSchur\)::ceres::Solve\('),
     @('Ceres budget reach diagnostic is updated after Solve','BackendOptimizer.cpp','out.ceresTimeBudgetReached=out.ceresMs\*1e-3>=timeLimit;'),
     @('slow gate does not consume Ceres time regression','ManagedWindowRegression.cpp','afterSlowGate.accepted&&afterSlowGate.passes==1'),
     @('Schur eligibility checks the historical prior','BackendOptimizer.cpp','\(!graph.prior\|\|independent\(graph.prior->keys\(\)\)'),

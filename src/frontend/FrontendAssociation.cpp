@@ -16,6 +16,9 @@
 #include <sstream>
 #include <queue>
 #include <functional>
+#ifdef CGMLI_ENABLE_CUDA_ORB
+#include <visual/features/OrbMatchCuda.hpp>
+#endif
 
 namespace cgmli {
     namespace frontend_association {
@@ -109,12 +112,15 @@ namespace cgmli {
                 }
             }
         }
-        Plan propose(const Estimator& estimator, const Options& options) {
+        Plan propose(const Estimator& estimator, const Options& options,const MultiFrame* descriptorSource) {
             const auto started = std::chrono::steady_clock::now();
             const auto milliseconds = [](const auto& beginning) { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - beginning).count(); };
             options.validate(); Plan plan; const auto currentId = estimator.currentStateId();
             const auto current = estimator.associationFrame(currentId);
             if (!current) throw std::invalid_argument("Append extracted features with addStates before association");
+            if(descriptorSource && (descriptorSource->id()!=current->id() ||
+                descriptorSource->numFrames()!=current->numFrames()))
+                throw std::invalid_argument("Device descriptor source must be the current rig frame");
             if (current->numFrames() > 1 && !current->cameraSystem().overlapComputationValid())
                 throw std::logic_error("Frontend cross-camera matching requires a valid rig FOV overlap graph");
             plan.current = current;
@@ -224,6 +230,14 @@ namespace cgmli {
             for (size_t q = 0; q < current->numFrames(); ++q) for (size_t t = q + 1; t < current->numFrames(); ++t)
                 if (current->hasOverlap(t, q) && current->hasOverlap(q, t)) jobs.push_back({ current.get(),q,t,true });
             std::vector<Result> results(jobs.size());
+            features::detail::OrbCudaMatcherSession* cudaMatcher=nullptr;
+#ifdef CGMLI_ENABLE_CUDA_ORB
+            if(options.useCudaMatcher) {
+                static thread_local features::detail::OrbCudaMatcherSession session;
+                session.beginProposal();
+                cudaMatcher=&session;
+            }
+#endif
             plan.preparationMs = milliseconds(started); const auto matchingStarted = std::chrono::steady_clock::now();
             std::vector<Candidate> candidates;
             plan.stagedUsed = options.stagedMatching && !plan.sources.empty() && !points.empty();
@@ -231,6 +245,8 @@ namespace cgmli {
             for (size_t c = 0; c < current->numFrames(); ++c) mapClaimed[c].resize(current->numKeypoints(c), 0);
             const auto accumulate = [&](const Result& result) {
                 if (result.error) std::rethrow_exception(result.error);
+                if(result.statistics.usedCuda) ++plan.cudaMatchingJobs;
+                plan.residentDescriptorSets+=result.statistics.residentDescriptorSets;
                 plan.candidatePairs += result.statistics.candidatePairs; plan.descriptorComparisons += result.statistics.descriptorComparisons;
                 plan.matchingSetupMs += result.statistics.setupMs; plan.matchingTraversalMs += result.statistics.traversalMs;
                 plan.matchingSelectionMs += result.statistics.selectionMs; plan.matchingGuidanceMs += result.guidanceMs;
@@ -296,6 +312,8 @@ namespace cgmli {
                     }
                     if (keys.empty()) return;
                     features::OrbMatchGuidance guidance;
+                    guidance.cudaSession=cudaMatcher;
+                    if(descriptorSource) guidance.deviceTrain=descriptorSource->cudaDescriptorRows(t);
                     // Use the projection neighborhood for descriptor ambiguity tests.
                     // Applying the final tight angular gate here would often leave only
                     // one neighbor and make strict ratio tests impossible. Validate the
@@ -336,6 +354,11 @@ namespace cgmli {
                 const auto guidanceStarted = std::chrono::steady_clock::now();
                 if (source.descriptors(q).empty() || current->descriptors(t).empty()) return;
                 features::OrbMatchGuidance guidance;
+                guidance.cudaSession=cudaMatcher;
+                if(descriptorSource) {
+                    if(stereo) guidance.deviceQuery=descriptorSource->cudaDescriptorRows(q);
+                    guidance.deviceTrain=descriptorSource->cudaDescriptorRows(t);
+                }
                 guidance.queryCamera = source.geometry(q); guidance.trainCamera = current->geometry(t);
                 const auto& queryCache = immutable.at(source.id()).at(q);
                 const auto& trainCache = immutable.at(current->id()).at(t);
@@ -399,10 +422,13 @@ namespace cgmli {
                 for (auto index : indices) accumulate(results[index]);
                 plan.seedJobs += indices.size();
                 };
-            std::vector<size_t> primary, remaining;
+            std::vector<size_t> primary, remaining, stereo;
+            const bool deferStereo=plan.stagedUsed && options.deferHealthyStereo &&
+                plan.trackingSeeds>=options.minimumStageMatchesPerCamera*current->numFrames();
             const auto latestSource = plan.sources.empty() ? StateId() : plan.sources.rbegin()->first;
             for (size_t i = 0; i < jobs.size(); ++i) {
                 const auto& job = jobs[i];
+                if(deferStereo && job.stereo) { stereo.push_back(i); continue; }
                 if (!plan.stagedUsed || job.stereo || (StateId(job.source->id()) == latestSource && job.q == job.t)) primary.push_back(i);
                 else remaining.push_back(i);
             }
@@ -444,6 +470,19 @@ namespace cgmli {
                 const auto& newPose = immutable.at(current->id()).at(0).T_WC;
                 const double rotation = std::acos(std::clamp(0.5 * ((oldPose.C().transpose() * newPose.C()).trace() - 1), -1.0, 1.0));
                 plan.stageRotationRadians = rotation;
+                if(!stereo.empty()) {
+                    std::vector<size_t> needed;
+                    for(auto i:stereo) {
+                        const auto& job=jobs[i];
+                        if(rotation>0.10 || weak[job.q] || weak[job.t] ||
+                            plan.stageMapMatches[job.q]<options.minimumStageMatchesPerCamera ||
+                            plan.stageMapMatches[job.t]<options.minimumStageMatchesPerCamera) needed.push_back(i);
+                    }
+                    plan.deferredStereoJobs=stereo.size()-needed.size();
+                    runJobs(needed);
+                    primary.insert(primary.end(),needed.begin(),needed.end());
+                    if(!needed.empty()) weak=weakCoverage(plan.stagePrimaryMatches,plan.stagePrimarySectors,plan.stagePrimaryExistingMatches);
+                }
                 plan.stageFallbackReason = "sufficient_support";
                 if (rotation > 0.10) {
                     // IMU-predicted turns can move features between any camera pair.
@@ -483,6 +522,7 @@ namespace cgmli {
                 }
                 LOG(INFO) << "[Match][Stages] frame=" << current->id() << " reason=" << plan.stageFallbackReason
                     << " rotation_rad=" << plan.stageRotationRadians << " primary_jobs=" << primary.size()
+                    << " deferred_stereo_jobs=" << plan.deferredStereoJobs
                     << " expansion_jobs=" << plan.expansionJobs << " broad_jobs=" << plan.broadJobs
                     << " camera_map_ready_primary_sectors_expanded=" << support.str()
                     << " camera_existing_primary_expanded="<<existingSupport.str();

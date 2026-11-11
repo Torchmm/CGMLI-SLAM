@@ -30,6 +30,12 @@ namespace cgmli {
             options.incrementalImu=p.estimator.incremental_imu;
             options.preserveOldestVisualInformation=p.estimator.preserve_oldest_visual_information;
             options.cacheVisualPairs=p.estimator.cache_visual_pairs;
+            const auto& visualBatch=p.estimator.backend_visual_batch;
+            if(visualBatch=="cuda") options.visualBatchMode=backend::VisualBatchMode::Cuda;
+            else if(visualBatch=="hybrid") options.visualBatchMode=backend::VisualBatchMode::Hybrid;
+            else if(visualBatch=="schur") options.visualBatchMode=backend::VisualBatchMode::Schur;
+            else if(visualBatch=="audit") options.visualBatchMode=backend::VisualBatchMode::Audit;
+            else if(visualBatch!="cpu") throw std::invalid_argument("backend_visual_batch must be cpu, cuda, hybrid, schur, or audit");
             if(p.estimator.backend_dense_schur) options.linearSolver=backend::BackendLinearSolver::DenseSchur;
             options.validate(); return options;
         }
@@ -90,6 +96,8 @@ namespace cgmli {
             || !std::isfinite(health.max_visual_imu_position_error) || health.max_visual_imu_position_error<=0
             || !std::isfinite(health.max_visual_imu_position_error_rate) || health.max_visual_imu_position_error_rate<0)
             throw Exception("Invalid VIO health/retry parameters");
+        if (health.max_consecutive_lightweight_frames<0)
+            throw Exception("max_consecutive_lightweight_frames must be nonnegative");
         if (imu.use && (!(imu.g > 0) || !(imu.sigma_g_c > 0) || !(imu.sigma_a_c > 0)
             || !(imu.sigma_gw_c > 0) || !(imu.sigma_aw_c > 0) || !(imu.sigma_bg > 0) || !(imu.sigma_ba > 0)
             || !(imu.g_max > 0) || !(imu.a_max > 0) || !imu.g0.allFinite() || !imu.a0.allFinite()
@@ -128,6 +136,8 @@ namespace cgmli {
         orbOptions.adaptiveGeometryCandidates=parameters_.frontend.orb_adaptive_geometry;
         orbOptions.batchDescriptorCoordinates=parameters_.frontend.orb_batch_descriptor_coordinates;
         orbOptions.groupedBalancing=parameters_.frontend.orb_grouped_balancing;
+        orbOptions.cudaEarlyIntegral=parameters_.frontend.orb_cuda_early_integral;
+        orbOptions.keepCudaDescriptorRows=parameters_.frontend.orb_cuda_matcher;
         orbOptions.minimumFastThreshold = parameters_.frontend.orb_min_fast_threshold; orbOptions.virtualFocalLength = parameters_.frontend.orb_virtual_focal_length;
         frontend_.setOrbOptions(orbOptions); 
         frontend_pose::Options poseOptions;
@@ -174,6 +184,10 @@ namespace cgmli {
             <<" incremental_imu="<<options_.incrementalImu<<" preserve_oldest_visual_information="<<options_.preserveOldestVisualInformation
             <<" dense_schur="<<parameters_.estimator.backend_dense_schur
             <<" cache_visual_pairs="<<options_.cacheVisualPairs
+            <<" backend_visual_batch="<<parameters_.estimator.backend_visual_batch
+            <<" lightweight_non_keyframes="<<health.lightweight_non_keyframes
+            <<" lightweight_new_imu_nis_gate="<<health.lightweight_new_imu_nis_gate
+            <<" max_consecutive_lightweight_frames="<<health.max_consecutive_lightweight_frames
             <<" keyframe_anchor_promotion="<<parameters_.frontend.require_keyframe_anchor_for_promotion
             <<" max_tracking_seeds="<<parameters_.frontend.max_tracking_seeds
             <<" seed_max_untracked_s="<<parameters_.frontend.seed_max_untracked_seconds
@@ -198,6 +212,8 @@ namespace cgmli {
             << " pyramid_levels=" << orbOptions.pyramidLevels << " scale=" << orbOptions.scaleFactor
             << " FAST=" << orbOptions.initialFastThreshold << '/' << orbOptions.minimumFastThreshold
             << " layer_fast=" << orbOptions.layerFast
+            << " cuda_matcher=" << parameters_.frontend.orb_cuda_matcher
+            << " cuda_early_integral=" << orbOptions.cudaEarlyIntegral
             << " hamming_threshold=" << parameters_.frontend.orb_matching_threshold
             << " descriptor_mode=" << descriptorModeName(orbOptions.descriptorMode)
             << " virtual_focal_config=" << orbOptions.virtualFocalLength;
@@ -863,30 +879,68 @@ namespace cgmli {
     void ThreadedSlam::optimizeAndPublish() {
         try {
             const auto started=std::chrono::steady_clock::now();
-            auto decision = pendingCalibrationRetry_ ? *pendingCalibrationRetry_ : cameraCalibrationDecision();
-            decision.gateMs = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
-            pendingCalibrationRetry_.reset();
-            const backend::CalibrationUpdatePolicy calibration = [decision](backend::BlockKey key, const backend::BackendGraph&) {
-                return (decision.rotation && key.kind == backend::BlockKind::CameraExtrinsic)
-                    || (decision.timeOffset && key.kind == backend::BlockKind::CameraTimeOffset);
-            };
-            pendingBudget_.cameraRotationOnly = decision.rotation && !decision.translation;
-            pendingBudget_.skipPreNis = parameters_.estimator.skip_pre_nis_when_tracking_healthy
-                && optimizationAttempts_ == 1 && latestTracking_.id.isInitialised() && latestTracking_.trackingQuality == TrackingQuality::Good
+            const bool healthy = optimizationAttempts_ == 1 && latestTracking_.id.isInitialised()
+                && latestTracking_.trackingQuality == TrackingQuality::Good
                 && pendingAssociation_.trackingAccepted && pendingAssociation_.metricPose
                 && pendingAssociation_.inliers >= 20 && pendingVisualLandmarks_ >= 20;
-            if (parameters_.camera.online_calibration.do_extrinsics) {
-                pendingBudget_.calibrationBlockViolation = [this](const backend::ParameterBlock& block) {
-                    return cameraCalibrationViolation(block);
-                };
-            }
+            auto fullBudget=pendingBudget_;
+            fullBudget.skipPreNis=parameters_.estimator.skip_pre_nis_when_tracking_healthy && healthy;
+            fullBudget.allowOnlineSchur=optimizationAttempts_==1;
             const backend::SolutionValidator quality = [this](const backend::BackendGraph& graph,std::string& reason) {
                 return validateSolution(graph,reason);
             };
-            const auto step = estimator_.optimize(std::nullopt, calibration, quality, {}, pendingBudget_);
+            CameraCalibrationDecision decision;
+            backend::StepReport step;
+            bool lightweight=false,lightweightFallback=false;
+            double lightweightMs=0;
+            const auto& window=estimator_.window();
+            const bool canRefineLocally=optimizationAttempts_==1 && latestTracking_.id.isInitialised()
+                && latestTracking_.trackingQuality!=TrackingQuality::Lost
+                && pendingAssociation_.trackingAccepted && pendingAssociation_.metricPose;
+            if(parameters_.estimator.lightweight_non_keyframes && parameters_.imu.use && canRefineLocally
+                && consecutiveLightweightFrames_<parameters_.estimator.max_consecutive_lightweight_frames
+                && window.canOptimizeLatestTwo()) {
+                const auto lightStarted=std::chrono::steady_clock::now();
+                auto lightBudget=fullBudget;
+                lightBudget.latestTwoPoseVelocityOnly=true;
+                lightBudget.gateLightweightNewImuNis=parameters_.estimator.lightweight_new_imu_nis_gate;
+                const auto penultimate=window.order()[window.size()-2];
+                step=estimator_.optimize(std::nullopt, {}, {}, {}, lightBudget);
+                lightweightMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-lightStarted).count();
+                lightweight=step.accepted;
+                lightweightFallback=!lightweight;
+                const auto& oldImu=step.solve.lightweightOldImu;
+                const auto& newImu=step.solve.lightweightNewImu;
+                LOG(INFO)<<"[Lightweight] frame="<<pendingFrame_->id()<<" penultimate="<<penultimate.value()<<" accepted="<<lightweight
+                    <<" step_ms="<<lightweightMs<<" ceres_ms="<<step.solve.ceresMs
+                    <<" free_dof="<<step.solve.effectiveParameters<<" residual_blocks="<<step.solve.residualBlocks
+                    <<" old_imu_factor="<<oldImu.factor<<" old_imu_nis_pre="<<oldImu.before<<" old_imu_nis_post="<<oldImu.after
+                    <<" new_imu_factor="<<newImu.factor<<" new_imu_nis_pre="<<newImu.before<<" new_imu_nis_post="<<newImu.after
+                    <<" imu_nis="<<step.solve.postSolveResiduals[1].maxNis<<" reason="<<step.message;
+            }
+            if(lightweight) {
+                ++consecutiveLightweightFrames_;
+                decision.reason="lightweight_frozen";
+            } else {
+                const auto calibrationStarted=std::chrono::steady_clock::now();
+                decision=pendingCalibrationRetry_?*pendingCalibrationRetry_:cameraCalibrationDecision();
+                decision.gateMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-calibrationStarted).count();
+                const backend::CalibrationUpdatePolicy calibration=[decision](backend::BlockKey key,const backend::BackendGraph&) {
+                    return (decision.rotation && key.kind==backend::BlockKind::CameraExtrinsic)
+                        || (decision.timeOffset && key.kind==backend::BlockKind::CameraTimeOffset);
+                };
+                fullBudget.cameraRotationOnly=decision.rotation && !decision.translation;
+                if(parameters_.camera.online_calibration.do_extrinsics)
+                    fullBudget.calibrationBlockViolation=[this](const backend::ParameterBlock& block) {
+                        return cameraCalibrationViolation(block);
+                    };
+                step=estimator_.optimize(std::nullopt,calibration,quality,{},fullBudget);
+                if(step.accepted) consecutiveLightweightFrames_=0;
+            }
+            pendingCalibrationRetry_.reset();
             if (!step.solve.rejectedCalibration.empty())
                 pendingCalibrationRetry_ = calibrationRetryDecision(decision, step.solve.rejectedCalibration);
-            recordCameraCalibration(decision, step);
+            if(!lightweight || pendingFrame_->id()%30==0) recordCameraCalibration(decision,step);
             optimizationRetryable_=step.solve.retryable;
             if(step.solve.residualStatisticsValid && (VLOG_IS_ON(1) || !step.accepted || pendingFrame_->id()%30==0)) {
                 const char* kinds[]{"visual","imu","lidar","prior","other"};
@@ -895,6 +949,7 @@ namespace cgmli {
                 for(size_t phase=0;phase<3;++phase) for(size_t kind=0;kind<5;++kind) {
                     const auto& s=(*values[phase])[kind]; if(!s.factors) continue;
                     LOG(INFO)<<"[Residual] frame="<<pendingFrame_->id()<<" accepted="<<step.accepted<<" phase="<<phases[phase]
+                         <<" solve_mode="<<(lightweight?"lightweight":"full")
                         <<" kind="<<kinds[kind]<<" factors="<<s.factors<<" components="<<s.components
                         <<" white_component_rms="<<s.componentRms()<<" nis_p50="<<s.medianNis<<" nis_p95="<<s.p95Nis
                         <<" nis_max="<<s.maxNis<<" over_gate="<<s.overGate<<" robust_cost="<<s.robustCost<<" worst_factor="<<s.worstFactor;
@@ -915,6 +970,8 @@ namespace cgmli {
                 << " extrinsics_unlocked=" << decision.rotation << " elapsed_ms=" << elapsed << " reason=" << step.message;
             if(VLOG_IS_ON(1) || !step.accepted || elapsed>200 || pendingFrame_->id()%30==0)
                 LOG(INFO)<<"[Timing][Solve] frame="<<pendingFrame_->id()<<" accepted="<<step.accepted
+                    <<" solve_mode="<<(lightweight?"lightweight":"full")<<" lightweight_fallback="<<lightweightFallback
+                    <<" lightweight_ms="<<lightweightMs
                     <<" visual_jacobian="<<(step.solve.analyticVisualJacobians?"analytic":"numerical")
                     <<" refreshed_imu="<<step.solve.refreshedImuFactors
                     <<" imu_refresh_ms="<<step.solve.imuRefreshMs
@@ -1036,6 +1093,7 @@ namespace cgmli {
             const double publicationMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-publicationStarted).count();
             if(VLOG_IS_ON(1) || elapsed>200 || publicationMs>200 || step.snapshot->revision==1 || step.snapshot->revision%30==0)
                 LOG(INFO)<<"[Timing][Backend] frame="<<pendingFrame_->id()<<" gate_ms="<<step.solve.gatingMs
+                    <<" solve_mode="<<(lightweight?"lightweight":"full")<<" lightweight_fallback="<<lightweightFallback
                     <<" pre_nis_skipped="<<step.solve.preNisSkipped<<" pre_nis_ms="<<step.solve.preNisMs
                     <<" post_nis_ms="<<step.solve.postNisMs
                     <<" residual_stats_ms="<<step.solve.residualStatisticsMs

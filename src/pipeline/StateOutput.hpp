@@ -11,6 +11,7 @@ AlignedVector<kinematics::Transformation> cameraExtrinsics(const backend::Backen
     const cameras::NCameraSystem&,const kinematics::Transformation& T_BS);
 std::shared_ptr<MapPointVector> mapPoints(const backend::BackendSnapshot&);
 double trackingCoverage(const MultiFrame&,const backend::BackendSnapshot&);
+double trackingCoverage(const MultiFrame&,const backend::LandmarkStore&,const backend::BackendGraph&);
 bool writeTrajectory(const std::string&,const StateHistory&,bool rpg);
 bool writeMap(const std::string&,const MapPointVector&);
 } }

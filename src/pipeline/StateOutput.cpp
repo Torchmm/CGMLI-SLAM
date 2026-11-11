@@ -41,10 +41,7 @@ std::shared_ptr<MapPointVector> mapPoints(const backend::BackendSnapshot& snapsh
     }
     return result;
 }
-double trackingCoverage(const MultiFrame& frame,const backend::BackendSnapshot& snapshot) {
-    std::set<KeypointIdentifier> tracked;
-    for(const auto& point:snapshot.landmarks) if(point.pointWorld) for(const auto& o:point.observations)
-        if(o.use==backend::ObservationUse::LiveFactor) tracked.insert(o.key);
+static double gridTrackingCoverage(const MultiFrame& frame,const std::set<KeypointIdentifier>& tracked) {
     size_t total=0,matched=0;
     for(size_t c=0;c<frame.numFrames();++c) {
         std::set<int> all,good; const auto camera=frame.geometry(c);
@@ -56,6 +53,22 @@ double trackingCoverage(const MultiFrame& frame,const backend::BackendSnapshot& 
         total+=all.size(); matched+=good.size();
     }
     return total?double(matched)/total:0;
+}
+double trackingCoverage(const MultiFrame& frame,const backend::BackendSnapshot& snapshot) {
+    std::set<KeypointIdentifier> tracked;
+    for(const auto& point:snapshot.landmarks) if(point.pointWorld) for(const auto& o:point.observations)
+        if(o.key.frameId==frame.id() && o.use==backend::ObservationUse::LiveFactor) tracked.insert(o.key);
+    return gridTrackingCoverage(frame,tracked);
+}
+double trackingCoverage(const MultiFrame& frame,const backend::LandmarkStore& landmarks,const backend::BackendGraph& graph) {
+    std::set<KeypointIdentifier> tracked;
+    for(const auto& key:landmarks.inFrame(StateId(frame.id()))) {
+        const auto* observation=landmarks.find(key);
+        if(!observation || observation->use!=backend::ObservationUse::LiveFactor) continue;
+        const auto factor=graph.factors.find(observation->factorId);
+        if(factor!=graph.factors.end() && factor->second.participates()) tracked.insert(key);
+    }
+    return gridTrackingCoverage(frame,tracked);
 }
 bool writeTrajectory(const std::string& path,const StateHistory& history,bool rpg) {
     std::ofstream file(std::filesystem::u8path(path)); if(!file) return false; file<<std::setprecision(17);

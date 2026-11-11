@@ -59,60 +59,50 @@ void NCameraSystem::computeOverlaps()
   const size_t count = cameraGeometries_.size();
   std::vector<std::vector<cv::Mat>> masks(count, std::vector<cv::Mat>(count));
   std::vector<std::vector<bool>> visible(count, std::vector<bool>(count, false));
-  for (size_t cameraIndexSeenBy = 0; cameraIndexSeenBy < count;
-      ++cameraIndexSeenBy) {
-    for (size_t cameraIndex = 0; cameraIndex < count;
-        ++cameraIndex) {
+  struct OverlapTarget {
+    size_t index;
+    const CameraBase* camera;
+    Eigen::Matrix3d rotation;
+    cv::Mat* mask;
+    uchar* row = nullptr;
+    bool hasOverlap = false;
+  };
+  for (size_t source = 0; source < count; ++source) {
+    const auto& camera = cameraGeometries_[source];
+    const int height = int(camera->imageHeight()), width = int(camera->imageWidth());
+    visible[source][source] = true;
+    std::vector<OverlapTarget> targets;
+    targets.reserve(count - 1);
+    for (size_t target = 0; target < count; ++target) {
+      if (target == source) continue;
+      auto& mask = masks[target][source];
+      mask = cv::Mat::zeros(height, width, CV_8UC1);
+      const auto relative = T_SC_[target]->inverse() * (*T_SC_[source]);
+      targets.push_back({target, cameraGeometries_[target].get(), relative.C(), &mask});
+    }
+    if (targets.empty()) continue;
 
-      // Self visibility needs neither projection nor an allocated image mask.
-      if (cameraIndex == cameraIndexSeenBy) {
-        visible[cameraIndexSeenBy][cameraIndex] = true;
-        continue;
-      }
-      {
-        const auto& camera = cameraGeometries_[cameraIndex];
-        // sizing the overlap map:
-        const size_t height = camera->imageHeight();
-        const size_t width = camera->imageWidth();
-        cv::Mat& overlapMat = masks[cameraIndexSeenBy][cameraIndex];
-        overlapMat = cv::Mat::zeros(int(height), int(width), CV_8UC1);
-        // go through all the pixels:
-        std::shared_ptr<const CameraBase> otherCamera =
-            cameraGeometries_[cameraIndexSeenBy];
-        const cgmli::kinematics::Transformation T_Cother_C =
-            T_SC_[cameraIndexSeenBy]->inverse() * (*T_SC_[cameraIndex]);
-        for (size_t u = 0; u < width; ++u) {
-          for (size_t v = 0; v < height; ++v) {
-            // backproject
-            Eigen::Vector3d ray_C;
-            if(!camera->backProject(Eigen::Vector2d(double(u), double(v)), &ray_C) || !ray_C.allFinite()) continue;
-            // project into other camera
-            Eigen::Vector3d ray_Cother = T_Cother_C.C() * ray_C;
-            // points at infinity, i.e. we only do rotation
-            Eigen::Vector2d imagePointInOtherCamera;
-            ProjectionStatus status = otherCamera->project(
-                ray_Cother, &imagePointInOtherCamera);
-
-            // check the result
-            if (status == ProjectionStatus::Successful) {
-
-              Eigen::Vector3d verificationRay;
-              if (!otherCamera->backProject(imagePointInOtherCamera,&verificationRay) || !verificationRay.allFinite()) continue;
-
-              // to avoid an artefact of some distortion models, check again
-              // note: (this should be fixed in the distortion implementation)
-              if(fabs(ray_Cother.normalized().transpose()*verificationRay.normalized()-1.0)
-                 <1.0e-10) {
-                // fill in the matrix:
-                overlapMat.at<uchar>(int(v),int(u)) = 1;
-                // and remember there is some overlap at all.
-                visible[cameraIndexSeenBy][cameraIndex] = true;
-              }
-            }
+    // One source back-projection feeds every destination. Keep the inverse
+    // projection check on each destination to reject ambiguous distortion.
+    for (int v = 0; v < height; ++v) {
+      for (auto& target : targets) target.row = target.mask->ptr<uchar>(v);
+      for (int u = 0; u < width; ++u) {
+        Eigen::Vector3d ray;
+        if (!camera->backProject(Eigen::Vector2d(u, v), &ray) || !ray.allFinite()) continue;
+        for (auto& target : targets) {
+          const Eigen::Vector3d rotated = target.rotation * ray;
+          Eigen::Vector2d pixel;
+          if (target.camera->project(rotated, &pixel) != ProjectionStatus::Successful) continue;
+          Eigen::Vector3d verificationRay;
+          if (!target.camera->backProject(pixel, &verificationRay) || !verificationRay.allFinite()) continue;
+          if (std::abs(rotated.normalized().transpose() * verificationRay.normalized() - 1.0) < 1.0e-10) {
+            target.row[u] = 1;
+            target.hasOverlap = true;
           }
         }
       }
     }
+    for (const auto& target : targets) visible[target.index][source] = target.hasOverlap;
   }
   overlapMats_ = std::move(masks);
   overlaps_ = std::move(visible);

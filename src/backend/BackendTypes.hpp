@@ -77,6 +77,7 @@ enum class FactorKind { Imu, Visual, Lidar, Zupt, Calibration, Other, Marginaliz
 enum class FactorLifecycle { Pending, Active, Rejected, Marginalized };
 enum class MarginalizationPolicy { MARGIN_OLD, MARGIN_SECOND_NEW };
 enum class BackendLinearSolver { SparseNormalCholesky, DenseQr, DenseSchur };
+enum class VisualBatchMode { Reference, Host, Cuda, Audit, Hybrid, Schur };
 using FactorId = uint64_t;
 
 /// Immutable replay material for native IMU interval concatenation. It is shared
@@ -190,6 +191,7 @@ struct BackendOptions {
     bool preferLandmarkSchur = true; // Only when EVERY residual satisfies landmark independence.
     bool analyticVisualJacobians = true; // False retains the central-difference reference.
     bool cacheVisualPairs = true; // False retains per-pose caching but recomputes pair chains per factor.
+    VisualBatchMode visualBatchMode = VisualBatchMode::Reference;
     BackendLinearSolver linearSolver = BackendLinearSolver::SparseNormalCholesky;
     double maxSolverTimeSeconds = 0.04; // Ceres calls only, shared across refits; excludes gate/build/marginalization.
     // Rank cutoff = max(absolute threshold, relative threshold * largest nonnegative
@@ -214,6 +216,11 @@ using ResidualStatisticsArray=std::array<ResidualStatistics,5>; // Visual, IMU, 
 enum class SolveTermination { Failure, SolverFinished, TimeBudget, IterationBudget, RefitBudget };
 const char* solveTerminationName(SolveTermination reason);
 struct SolveReport {
+    struct ImuEdgeNis {
+        FactorId factor=0;
+        double before=std::numeric_limits<double>::quiet_NaN();
+        double after=std::numeric_limits<double>::quiet_NaN();
+    };
     bool accepted = false;
     SolveTermination termination=SolveTermination::Failure;
     // Live outliers are already removed from the graph, but this accepted state
@@ -252,6 +259,7 @@ struct SolveReport {
     bool residualStatisticsValid=false;
     double residualStatisticsMs=0;
     ResidualStatisticsArray preGateResiduals{},preSolveResiduals{},postSolveResiduals{};
+    ImuEdgeNis lightweightOldImu,lightweightNewImu;
     int priorRows=0,priorColumns=0;
     bool schurIndependent=false;
     std::string linearSolverUsed="none",sparseBackend="none";
@@ -381,7 +389,7 @@ struct StepReport {
 
 /// Per-call controls, copied into the worker task. Minimum iterations affect the
 /// soft time limit; numeric convergence may still terminate a solve earlier.
-/// timeSeconds counts only time inside Ceres Solve calls, shared across refits.
+/// timeSeconds counts nonlinear solver time, shared across refits.
 /// It excludes frontend work, NIS gates, Problem construction and marginalization.
 struct SolveBudget {
     std::optional<double> timeSeconds;
@@ -389,6 +397,9 @@ struct SolveBudget {
     bool collectCameraLandmarkCounts=false;
     bool cameraRotationOnly=false; ///< Keep the physical rig translation fixed during this solve.
     bool skipPreNis=false; ///< The post-solve gate still runs before accepting or marginalizing.
+    bool latestTwoPoseVelocityOnly=false; ///< Refine the two newest poses and velocities before evicting the penultimate state.
+    bool gateLightweightNewImuNis=false; ///< Apply the newest-edge NIS limit in a two-frame solve.
+    bool allowOnlineSchur=true; ///< Retries can force the original Ceres solve.
     // Return a reason for a candidate calibration block outside its physical range.
     std::function<std::string(const ParameterBlock&)> calibrationBlockViolation;
 };

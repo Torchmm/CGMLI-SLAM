@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <utility>
 #include <chrono>
+#include <future>
 
 namespace cgmli { namespace offline {
 namespace {
@@ -103,23 +104,41 @@ void HiltiDatasetReader::processing() {
             if(!lidarCallback_(scan) && !stop_) throw std::runtime_error("LiDAR consumer rejected scan");
             ++stats_.lidarScans; stats_.lidarPoints+=scan.points.size(); stats_.invalidLidarPoints+=scan.invalidPoints;
         };
-        for(size_t p=first_;p<end_ && !stop_;++p) {
-            const auto packetStarted=std::chrono::steady_clock::now();
-            lidarReadMs=0; double imuReadMs=0,imuSubmitMs=0;
-            const auto& packet=packets_[p]; std::map<size_t,cv::Mat> images; std::map<size_t,Time> originalTimes;
-            for(const auto record:packet.records) {
+        struct DecodedImages {
+            std::map<size_t,cv::Mat> images;
+            std::map<size_t,Time> originalTimes;
+            double readMs=0;
+        };
+        const auto readImages=[&](size_t p) {
+            const auto started=std::chrono::steady_clock::now();
+            DecodedImages decoded;
+            for(const auto record:packets_[p].records) {
+                if(stop_) break;
                 auto image=binary_.readImage(record); const auto camera=parameters_.nCameraSystem.cameraGeometry(image.camera);
                 if(image.image.cols!=int(camera->imageWidth()) || image.image.rows!=int(camera->imageHeight()))
                     throw std::runtime_error("Image dimensions differ from calibration: "+image.topic);
-                images.emplace(image.camera,std::move(image.image));
-                originalTimes.emplace(image.camera,projectTime(image.timestampNs));
+                decoded.images.emplace(image.camera,std::move(image.image));
+                decoded.originalTimes.emplace(image.camera,projectTime(image.timestampNs));
             }
+            decoded.readMs=milliseconds(started);
+            return decoded;
+        };
+        // One packet of look-ahead overlaps image decode with queue backpressure.
+        // The future joins its reader on error/stop before the binary is closed.
+        auto nextImages=std::async(std::launch::async,readImages,first_);
+        for(size_t p=first_;p<end_ && !stop_;++p) {
+            const auto packetStarted=std::chrono::steady_clock::now();
+            lidarReadMs=0; double imuReadMs=0,imuSubmitMs=0;
+            const auto& packet=packets_[p];
+            auto decoded=nextImages.get();
+            const double imageWaitMs=milliseconds(packetStarted);
             if(stop_) break;
-            const double imageReadMs=milliseconds(packetStarted); const auto submitStarted=std::chrono::steady_clock::now();
+            if(p+1<end_) nextImages=std::async(std::launch::async,readImages,p+1);
+            const double imageReadMs=decoded.readMs; const auto submitStarted=std::chrono::steady_clock::now();
             // Submit the image before its future IMU support. With bounded input
             // queues the control thread must be able to consume this interval.
-            if(images.size()!=4 || originalTimes.size()!=4) throw std::runtime_error("Incomplete four-camera bundle");
-            if(!imagesCallback_(projectTime(packet.timestampNs),images,originalTimes)) {
+            if(decoded.images.size()!=4 || decoded.originalTimes.size()!=4) throw std::runtime_error("Incomplete four-camera bundle");
+            if(!imagesCallback_(projectTime(packet.timestampNs),decoded.images,decoded.originalTimes)) {
                 if(stop_) break;
                 throw std::runtime_error("Estimator rejected image input");
             }
@@ -150,7 +169,7 @@ void HiltiDatasetReader::processing() {
                 const double ioMs=imageReadMs+imuReadMs+lidarReadMs;
                 if(VLOG_IS_ON(1) || stats_.imagePackets==1 || stats_.imagePackets%30==0 || ioMs>200 || imageSubmitMs+imuSubmitMs>200)
                     LOG(INFO)<<"[Timing][Input] epoch="<<stats_.imagePackets<<" image_read_ms="<<imageReadMs
-                        <<" imu_read_ms="<<imuReadMs<<" lidar_read_ms="<<lidarReadMs
+                        <<" image_wait_ms="<<imageWaitMs<<" imu_read_ms="<<imuReadMs<<" lidar_read_ms="<<lidarReadMs
                         <<" submit_block_ms="<<imageSubmitMs+imuSubmitMs<<" total_ms="<<milliseconds(packetStarted)
                         <<" lidar_decode="<<options_.decodeLidarPoints;
                 VLOG(2) << "[Dataset] epoch=" << stats_.imagePackets << " image_t_ns=" << packet.timestampNs

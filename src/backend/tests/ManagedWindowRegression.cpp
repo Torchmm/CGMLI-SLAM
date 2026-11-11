@@ -6,6 +6,9 @@
 #include <backend/BackendFactors.hpp>
 #include <backend/BackendOptimizer.hpp>
 #include <backend/WindowVisualFactor.hpp>
+#ifdef CGMLI_ENABLE_CUDA_ORB
+#include <cuda_runtime_api.h>
+#endif
 #include <backend/BackendProblem.hpp>
 #include <cameras/PinholeCamera.hpp>
 #include <cameras/EucmCamera.hpp>
@@ -531,6 +534,20 @@ void visualPoseCacheMatchesUncachedTrials() {
     const auto& factor=graph.factors.at(observation->factorId); std::vector<const double*> bindings;
     for(auto key:factor.keys) bindings.push_back(graph.blocks.at(key).value.data());
     VisualEvaluationCache cache; const auto cached=cacheWindowVisualCost(*factor.cost,bindings,cache);
+    VisualEvaluationCache hostBatch;
+    hostBatch.configureBatch(VisualBatchMode::Host);
+    const auto packed=cacheWindowVisualCost(*factor.cost,bindings,hostBatch);
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    int devices=0;
+    VisualEvaluationCache cudaBatch,hybridBatch;
+    std::unique_ptr<::ceres::CostFunction> device,hybrid;
+    if(cudaGetDeviceCount(&devices)==cudaSuccess && devices) {
+        cudaBatch.configureBatch(VisualBatchMode::Cuda);
+        device=cacheWindowVisualCost(*factor.cost,bindings,cudaBatch);
+        hybridBatch.configureBatch(VisualBatchMode::Hybrid);
+        hybrid=cacheWindowVisualCost(*factor.cost,bindings,hybridBatch);
+    }
+#endif
     require(bool(cached),"native sphere cost supports solver-local pose cache");
     require(cache.cameraCount()==2,"Two state/camera chains must be shared by the pair");
     require(cache.pairCount()==1,"One camera-pair transform is bound for the mixed-camera factor");
@@ -560,6 +577,27 @@ void visualPoseCacheMatchesUncachedTrials() {
         require(factor.cost->Evaluate(x.data(),a.data(),pa.data()) && cached->Evaluate(x.data(),b.data(),pb.data()),"cached derivative trial");
         for(size_t i=0;i<ja.size();++i) debug::recordDerivative("cached_jacobian_"+std::to_string(trial)+"_"+std::to_string(i),
             (ja[i]-jb[i]).norm(),ja[i].norm(),1e-10,1e-10);
+        const auto checkBatch=[&](VisualEvaluationCache& owner,const ::ceres::CostFunction& cost) {
+            owner.PrepareForEvaluation(false,true);
+            require(cost.Evaluate(x.data(),b.data(),nullptr) && (a-b).norm()<1e-9,
+                "batch residual-only trial agrees with scalar reference");
+            owner.PrepareForEvaluation(true,false);
+            require(cost.Evaluate(x.data(),b.data(),pb.data()) && !owner.batchFailures && !owner.batchInvalid,
+                "batch analytic trial with time offset");
+            require((a-b).norm()<1e-9,"batch residual differs from scalar reference");
+            for(size_t i=0;i<ja.size();++i) require((ja[i]-jb[i]).norm()<1e-9*std::max(1.0,ja[i].norm()),
+                "batch analytic Jacobian differs from scalar reference");
+        };
+        require(bool(packed) && hostBatch.batchFactors()==1,"host batch binds the real visual factor");
+        checkBatch(hostBatch,*packed);
+#ifdef CGMLI_ENABLE_CUDA_ORB
+        if(device) checkBatch(cudaBatch,*device);
+        if(hybrid) {
+            checkBatch(hybridBatch,*hybrid);
+            require(hybridBatch.batchCpuTrials==trial+1 && hybridBatch.batchEvaluations==trial+1,
+                "hybrid trial skips CUDA and promotes the same trial point to a CUDA Jacobian");
+        }
+#endif
         const auto refreshes=cache.refreshCount(); cache.PrepareForEvaluation(true,false);
         require(cache.refreshCount()==refreshes,"Jacobian request at the same evaluation point must reuse pair data");
         for(size_t requested=0;requested<jb.size();++requested) {
@@ -581,6 +619,58 @@ void visualPoseCacheMatchesUncachedTrials() {
             debug::recordDerivative("fixed_time_jacobian_"+std::to_string(trial)+"_"+std::to_string(i),
                 (ja[i]-jb[i]).norm(),ja[i].norm(),1e-10,1e-10);
     }
+}
+void onlineSchurMatchesJointCpuSolve() {
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    int devices=0;
+    if(cudaGetDeviceCount(&devices)!=cudaSuccess || !devices) return;
+    Fixture fixture;
+    BackendOptions options;
+    options.maxIterations=15;
+    options.maxSolverTimeSeconds=2;
+    options.maxOutlierRefits=0;
+    options.linearSolver=BackendLinearSolver::DenseSchur;
+    FixedLagBackend backend(options); initialize(backend,fixture);
+    append(backend,fixture,1); append(backend,fixture,2);
+    poseConstraints(backend,StateId(1)); poseConstraints(backend,StateId(2));
+    std::string error;
+    for(size_t i=0;i<3;++i) {
+        const LandmarkId id(i+1);
+        require(backend.addLandmark(id,{1,0,i},0.97*fixture.rho(1,0,i),error) &&
+            backend.addObservation(id,{1,1,i},error) && backend.addObservation(id,{2,0,i},error) &&
+            backend.addObservation(id,{2,1,i},error),"online Schur stereo and temporal measurements");
+    }
+    auto cpu=backend.window().graph();
+    cpu.blocks.at(BlockKey::pose(StateId(2))).value[1]+=0.003;
+    auto gpu=cpu;
+    const auto reference=BackendOptimizer(options).optimize(cpu,{},{});
+    options.visualBatchMode=VisualBatchMode::Schur;
+    const auto direct=BackendOptimizer(options).optimize(gpu,{},{});
+    require(reference.accepted && direct.accepted && direct.linearSolverUsed=="GPU_SCHUR_CPU_LDLT",
+        "joint visual and retained-state system takes the native Schur path");
+    require(std::abs(direct.initialCost-reference.initialCost)<1e-9 &&
+        std::abs(direct.finalCost-reference.finalCost)<1e-7,"joint Schur cost agrees with Ceres");
+    for(const auto& block:cpu.blocks)
+        require((block.second.value-gpu.blocks.at(block.first).value).norm()<1e-4,"joint Schur state agrees with Ceres");
+
+    auto bounded=backend.window().graph();
+    const BlockKey rangeKey{BlockKind::Landmark,1};
+    auto& range=bounded.blocks.at(rangeKey);
+    const double floor=1.03*fixture.rho(1,0,0);
+    range.value[0]=1.05*fixture.rho(1,0,0);
+    range.lower=Eigen::VectorXd::Constant(1,floor);
+    const auto projected=BackendOptimizer(options).optimize(bounded,{},{});
+    require(projected.accepted && projected.linearSolverUsed=="GPU_SCHUR_CPU_LDLT" &&
+        projected.finalCost<projected.initialCost && std::abs(range.value[0]-floor)<1e-6,
+        "bounded range uses the projected Schur step and its matching predicted decrease");
+
+    require(backend.addFactor(makeParameterPrior(backend.window().graph().blocks.at({BlockKind::Landmark,1}),
+        Eigen::Matrix<double,1,1>::Identity())).accepted(),"add retained cost depending on an eliminated range");
+    auto unsupported=backend.window().graph();
+    const auto fallback=BackendOptimizer(options).optimize(unsupported,{},{});
+    require(fallback.accepted && fallback.linearSolverUsed!="GPU_SCHUR_CPU_LDLT",
+        "range-dependent nonvisual factor falls back without omitting the factor");
+#endif
 }
 void cachedVisualGateMatchesReference() {
     Fixture f; FixedLagBackend backend; initialize(backend,f); std::string error;
@@ -1340,6 +1430,7 @@ void cgmli::debug::registerBackendCases(std::vector<cgmli::debug::ModuleCase>& c
     cases.push_back({"jacobian","analyticSphereDerivativeAgreement",[]() { analyticSphereDerivativeAgreement(); }});
     cases.push_back({"backend","cachedVisualGateMatchesReference",[]() { cachedVisualGateMatchesReference(); }});
     cases.push_back({"jacobian","visualPoseCacheMatchesUncachedTrials",[]() { visualPoseCacheMatchesUncachedTrials(); }});
+    cases.push_back({"backend","onlineSchurMatchesJointCpuSolve",[]() { onlineSchurMatchesJointCpuSolve(); }});
     cases.push_back({"backend","ownershipAndIndices",[]() { ownershipAndIndices(); }});
     cases.push_back({"backend","perStepBudgetAndHistory",[]() { perStepBudgetAndHistory(); }});
     cases.push_back({"backend","parallelNisGateAgreementAndRollback",[]() { parallelNisGateAgreementAndRollback(); }});
@@ -1374,6 +1465,7 @@ int main() {
         untouchedPriorAndDiagonalKernel(); redundantFrameKeepsTracksSparse();
         oldestFrameRetainsPriorFreeTracks();
         oldestSchurKeepsIdentityWithoutReusingEvidence(); cachedVisualGateMatchesReference(); visualPoseCacheMatchesUncachedTrials();
+        onlineSchurMatchesJointCpuSolve();
         constraintGradientBalanceIsRobustAndReadOnly();
         rigRotationSolvePreservesTranslationAndPriorCoordinates();
         std::cout<<"managed backend regression passed\n"; return 0;

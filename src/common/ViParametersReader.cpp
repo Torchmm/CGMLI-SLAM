@@ -329,6 +329,10 @@ void ViParametersReader::readConfigFile(const std::string& filename) {
     parseEntry(frontendNode,"pose_adaptive_ransac",viParameters_.frontend.pose_adaptive_ransac);
   if(!frontendNode["orb_staged_matching"].empty())
     parseEntry(frontendNode,"orb_staged_matching",viParameters_.frontend.orb_staged_matching);
+  if(!frontendNode["orb_cuda_matcher"].empty())
+    parseEntry(frontendNode,"orb_cuda_matcher",viParameters_.frontend.orb_cuda_matcher);
+  if(!frontendNode["orb_cuda_early_integral"].empty())
+    parseEntry(frontendNode,"orb_cuda_early_integral",viParameters_.frontend.orb_cuda_early_integral);
   if(!frontendNode["orb_fast_threshold"].empty())
     parseEntry(frontendNode,"orb_fast_threshold",viParameters_.frontend.orb_fast_threshold);
   if(!frontendNode["orb_min_fast_threshold"].empty())
@@ -347,6 +351,12 @@ void ViParametersReader::readConfigFile(const std::string& filename) {
     parseEntry(windowNode,"preserve_oldest_visual_information",viParameters_.estimator.preserve_oldest_visual_information);
   if(!windowNode["backend_dense_schur"].empty()) parseEntry(windowNode,"backend_dense_schur",viParameters_.estimator.backend_dense_schur);
   if(!windowNode["cache_visual_pairs"].empty()) parseEntry(windowNode,"cache_visual_pairs",viParameters_.estimator.cache_visual_pairs);
+  auto& visualBatch = viParameters_.estimator.backend_visual_batch;
+  if(!windowNode["backend_visual_batch"].empty())
+    parseEntry(windowNode,"backend_visual_batch",visualBatch);
+  CGMLI_ASSERT_TRUE(Exception, visualBatch=="cpu" || visualBatch=="cuda" || visualBatch=="hybrid" ||
+                    visualBatch=="schur" || visualBatch=="audit",
+                    "estimator_parameters.backend_visual_batch must be cpu, cuda, hybrid, schur, or audit")
   CGMLI_ASSERT_TRUE(Exception,std::isfinite(viParameters_.estimator.max_imu_interval_seconds)
       && viParameters_.estimator.max_imu_interval_seconds>0,"invalid maximum IMU interval duration")
   CGMLI_ASSERT_TRUE(Exception, windowNode["num_keyframes"].empty() && windowNode["num_imu_frames"].empty(),
@@ -384,6 +394,12 @@ void ViParametersReader::readConfigFile(const std::string& filename) {
     parseEntry(estimatorNode, "visual_nis_threshold", viParameters_.estimator.visual_nis_threshold);
   if (!estimatorNode["skip_pre_nis_when_tracking_healthy"].empty())
     parseEntry(estimatorNode, "skip_pre_nis_when_tracking_healthy", viParameters_.estimator.skip_pre_nis_when_tracking_healthy);
+  if (!estimatorNode["lightweight_non_keyframes"].empty())
+    parseEntry(estimatorNode, "lightweight_non_keyframes", viParameters_.estimator.lightweight_non_keyframes);
+  if (!estimatorNode["lightweight_new_imu_nis_gate"].empty())
+    parseEntry(estimatorNode, "lightweight_new_imu_nis_gate", viParameters_.estimator.lightweight_new_imu_nis_gate);
+  if (!estimatorNode["max_consecutive_lightweight_frames"].empty())
+    parseEntry(estimatorNode, "max_consecutive_lightweight_frames", viParameters_.estimator.max_consecutive_lightweight_frames);
   if (!estimatorNode["parallel_marginalization_accumulation"].empty())
     parseEntry(estimatorNode, "parallel_marginalization_accumulation", viParameters_.estimator.parallel_marginalization_accumulation);
   if (!estimatorNode["max_visual_imu_rotation_error"].empty())

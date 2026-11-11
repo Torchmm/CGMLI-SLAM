@@ -1,6 +1,7 @@
 #pragma once
 #include "FrameStore.hpp"
 #include "LandmarkStore.hpp"
+#include "VisualCudaBatch.hpp"
 #include <ceres/evaluation_callback.h>
 #include <array>
 #include <cstdint>
@@ -47,6 +48,21 @@ struct VisualTimedObserver {
 /// pointers. Trial points/refits refresh the same immutable worker read view.
 class VisualEvaluationCache final : public ::ceres::EvaluationCallback {
 public:
+    VisualEvaluationCache();
+    ~VisualEvaluationCache() override;
+    void configureBatch(VisualBatchMode,const std::shared_ptr<detail::VisualCudaWorkspace>& workspace={});
+    void setBatchMode(VisualBatchMode);
+    bool hasBatch() const { return bool(batch_); }
+    std::size_t bindBatch(detail::VisualBatchInput,const std::vector<const double*>&);
+    const detail::VisualBatchResidual* batchResult(std::size_t,const double** jacobians) const;
+    std::size_t batchFactors() const;
+    bool auditDirectNormal(const std::vector<detail::DirectVisualLayout>&,const std::vector<double>& plus,
+        const std::vector<int>& retained,const std::vector<int>& eliminated,detail::VisualNormalSystem&) const;
+    detail::VisualCudaBatch* linearizeSchur(const std::vector<detail::DirectVisualLayout>&,
+        const std::vector<double>& plus,int retained,int ranges,bool newTopology);
+    int batchEvaluations=0,batchFailures=0,batchInvalid=0,batchCpuTrials=0;
+    std::size_t batchJacobianBytes=0,batchDenseJacobianBytes=0;
+    double batchMs=0;
     const VisualPoseCacheValue* bind(const double* parameter);
     const VisualPairCacheValue* bindPair(const double* anchor,const double* observer,const double* extrinsic,
         const kinematics::Transformation& T_RCa,const kinematics::Transformation& T_RCb);
@@ -59,6 +75,8 @@ public:
     std::size_t pairCount() const { return pairs_.size(); }
     std::size_t refreshCount() const { return refreshCount_; }
 private:
+    struct Batch;
+    std::unique_ptr<Batch> batch_;
     std::map<const double*,VisualPoseCacheValue> poses_;
     // Include fixed per-frame rig transforms, not just camera indices: calibration
     // snapshots may differ. Entries remain stable while costs bind their addresses.
@@ -82,7 +100,7 @@ private:
 };
 std::unique_ptr<::ceres::CostFunction> cacheWindowVisualCost(const ::ceres::CostFunction&,
     const std::vector<const double*>& parameters,VisualEvaluationCache&,bool cachePairs=true,
-    bool fixedTime=false);
+    bool fixedTime=false,unsigned derivativeMask=~0u);
 
 /// CPU reference S^2 factor used by the managed observation API. Captures measurement
 /// values and fixed rig baselines, never mutable Frame/Store pointers. Same-epoch

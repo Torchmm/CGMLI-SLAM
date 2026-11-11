@@ -15,6 +15,10 @@
 #include <queue>
 #include <chrono>
 #include <limits>
+#ifdef CGMLI_ENABLE_CUDA_ORB
+#include <visual/features/OrbCuda.hpp>
+#include <glog/logging.h>
+#endif
 
 namespace cgmli {
     namespace features {
@@ -108,6 +112,16 @@ namespace cgmli {
                 }
             }
             if (mode != OrbExtractorOptions::DescriptorMode::Standard) initialiseGeometry();
+        }
+
+        OrbFeatureExtractor::~OrbFeatureExtractor() = default;
+
+        bool OrbFeatureExtractor::cudaReady() const {
+#ifdef CGMLI_ENABLE_CUDA_ORB
+            return bool(cuda_);
+#else
+            return false;
+#endif
         }
 
         void OrbFeatureExtractor::initialiseGeometry() {
@@ -327,16 +341,49 @@ namespace cgmli {
         void OrbFeatureExtractor::prepareStaticCaches() {
             if(cameraValidMask_.empty()) throw std::logic_error("ORB startup preparation requires a calibrated camera");
             initialiseLevels(cameraValidMask_.size());
-            if(staticMasksReady_) return;
-            // Only calibration/mask data are read. Never fabricate an image,
-            // update gravity or cache grayscale integral values during startup.
-            Pyramid pyramid; buildMasks(cameraValidMask_,pyramid);
-            staticSafeMasks_=std::move(pyramid.safeMasks);
-            staticSamplingMasks_=std::move(pyramid.samplingMasks);
-            staticInvalidIntegrals_=std::move(pyramid.invalidIntegrals);
-            staticCellMasks_=std::move(pyramid.cellMasks);
-            staticMasksReady_=true;
+            if(!staticMasksReady_) {
+                // Only calibration and mask data are read during startup.
+                Pyramid pyramid; buildMasks(cameraValidMask_,pyramid);
+                staticSafeMasks_=std::move(pyramid.safeMasks);
+                staticSamplingMasks_=std::move(pyramid.samplingMasks);
+                staticInvalidIntegrals_=std::move(pyramid.invalidIntegrals);
+                staticCellMasks_=std::move(pyramid.cellMasks);
+                staticMasksReady_=true;
+            }
+#ifdef CGMLI_ENABLE_CUDA_ORB
+            prepareCuda();
+#endif
         }
+#ifdef CGMLI_ENABLE_CUDA_ORB
+        void OrbFeatureExtractor::disableCuda(const char* reason) {
+            LOG(WARNING)<<"[ORB CUDA] CPU fallback for camera "<<camera_->id()<<": "<<reason;
+            cuda_.reset();
+            cudaDisabled_=true;
+        }
+
+        void OrbFeatureExtractor::prepareCuda() {
+            if(cuda_ || cudaDisabled_ || !options_.useCuda || !isCameraAware() || !options_.layerFast ||
+                options_.samplingMode!=OrbExtractorOptions::SamplingMode::SparseBox || staticSafeMasks_.empty()) return;
+            const auto size=staticSafeMasks_.front().size();
+            if(size.width>4096 || size.height>4096 ||
+                size_t(size.width)*size.height>size_t(std::numeric_limits<int>::max()/255)) {
+                disableCuda("unsupported image size");
+                return;
+            }
+            std::vector<cv::Mat> integralStorage(staticSafeMasks_.size());
+            std::vector<detail::OrbCudaLevel> levels;
+            levels.reserve(staticSafeMasks_.size());
+            for(size_t i=0;i<staticSafeMasks_.size();++i) {
+                staticInvalidIntegrals_[i].convertTo(integralStorage[i],CV_32S);
+                levels.push_back({levelSizes_[i].width,levelSizes_[i].height,integralStorage[i].ptr<int>()});
+            }
+            try {
+                cuda_=std::make_unique<detail::OrbCuda>(levels,options_.edgeThreshold,options_.cellSize,
+                    options_.minimumFastThreshold,&detail::kSparseOrbPattern.points[0][0],
+                    &detail::kSparseOrbPattern.pairs[0][0],options_.maxFeatures);
+            } catch(const detail::OrbCudaError& error) { disableCuda(error.what()); }
+        }
+#endif
         void OrbFeatureExtractor::buildPyramid(const cv::Mat& gray,cv::InputArray externalMask,Pyramid& pyramid) {
             initialiseLevels(gray.size()); pyramid={};
             const bool reusable=externalMask.empty();
@@ -446,7 +493,8 @@ namespace cgmli {
             std::vector<int> binOccupancy(bins, 0);
             for (std::size_t level = 0; level < images.size(); ++level) {
                 const cv::Mat& image = images[level]; const cv::Mat& mask = masks[level];
-                const int edge = options_.edgeThreshold, width = image.cols - 2 * edge, height = image.rows - 2 * edge;
+                const auto imageSize=mask.size();
+                const int edge = options_.edgeThreshold, width = imageSize.width - 2 * edge, height = imageSize.height - 2 * edge;
                 const int cols = (width + options_.cellSize - 1) / options_.cellSize;
                 const int rows = (height + options_.cellSize - 1) / options_.cellSize;
                 const int cellCount = cols * rows;
@@ -468,8 +516,24 @@ namespace cgmli {
                 std::vector<uint8_t> lowReady(size_t(cellCount),0);
                 auto& geometryMemo=geometryMemoScratch_; geometryMemo.clear();
                 auto& memoIndices=geometryMemoIndexScratch_[level];
-                if(options_.adaptiveGeometryCandidates) { memoIndices.create(image.size(),CV_32SC1); memoIndices.setTo(-1); }
+                if(options_.adaptiveGeometryCandidates) { memoIndices.create(imageSize,CV_32SC1); memoIndices.setTo(-1); }
                 int geometryQuota=options_.adaptiveGeometryCandidates?std::min(options_.candidatesPerCell,std::max(2,targetPerCell)):options_.candidatesPerCell;
+#ifdef CGMLI_ENABLE_CUDA_ORB
+                if(pyramid.cuda) {
+                    const auto bucketStarted=std::chrono::steady_clock::now();
+                    for(int cell=0;cell<cellCount;++cell) lowCells[cell].clear();
+                    const auto* corners=pyramid.cuda->corners(level);
+                    const int count=pyramid.cuda->cornerCount(level);
+                    for(int k=0;k<count;++k) {
+                        const auto corner=corners[k];
+                        const int cell=(corner.y()-edge)/options_.cellSize*cols+(corner.x()-edge)/options_.cellSize;
+                        const cv::KeyPoint point(float(corner.x()),float(corner.y()),7,-1,float(corner.score()));
+                        if(corner.score()>=options_.initialFastThreshold) layerCells[cell].push_back(point);
+                        if(options_.minimumFastThreshold<options_.initialFastThreshold) lowCells[cell].push_back(point);
+                    }
+                    lastTiming_.fastBucketMs+=milliseconds(bucketStarted);
+                } else
+#endif
                 if(options_.layerFast) {
                     const auto fastStarted=std::chrono::steady_clock::now();
                     auto& scores=fastScoreScratch_[level]; scores.create(image.size(),CV_8UC1); scores.setTo(0);
@@ -591,7 +655,12 @@ namespace cgmli {
                         const size_t cell=size_t(row)*cols+col;
                         const bool cachedLow=options_.adaptiveGeometryCandidates && threshold==options_.minimumFastThreshold
                             && options_.minimumFastThreshold<options_.initialFastThreshold;
-                        if(sharedCandidates) {
+                        if(pyramid.cuda) {
+                            // Device candidates use layer coordinates. Threshold
+                            // selection and per-cell quotas still run here.
+                            points=sharedCandidates?layerCells[cell]:lowCells[cell];
+                            if(cachedLow) lowReady[cell]=1;
+                        } else if(sharedCandidates) {
                             for(const auto& point:layerCells[size_t(row)*cols+col]) if(point.response>=threshold) points.push_back(point);
                         } else if(cachedLow && lowReady[cell]) {
                             points=lowCells[cell];
@@ -613,7 +682,7 @@ namespace cgmli {
                         lastTiming_.candidateSortMs+=milliseconds(sortStarted);
                         const auto filteringStarted=std::chrono::steady_clock::now();
                         for (auto point : points) {
-                            if(!sharedCandidates) point.pt += cv::Point2f(static_cast<float>(roi.x), static_cast<float>(roi.y));
+                            if(!pyramid.cuda && !sharedCandidates) point.pt += cv::Point2f(static_cast<float>(roi.x), static_cast<float>(roi.y));
                             if (point.pt.x < core.x || point.pt.x >= core.x + core.width ||
                                 point.pt.y < core.y || point.pt.y >= core.y + core.height || !safePoint(mask, point.pt)) continue;
                             int memoIndex=-1;
@@ -649,7 +718,7 @@ namespace cgmli {
                                 const bool pole = isCameraAware() && !aligned;
                                 const Eigen::Vector2d centre(point.pt.x, point.pt.y);
                                 if (options_.samplingMode == OrbExtractorOptions::SamplingMode::SparseBox) {
-                                    if (!detail::sparseSupportValid(image.size(), invalidIntegral, centre, warp, pole)) continue;
+                                    if (!detail::sparseSupportValid(imageSize, invalidIntegral, centre, warp, pole)) continue;
                                 } else {
                                     const double support = pole ? std::sqrt(2.0) * detail::kOrbTileRadius : detail::kOrbTileRadius;
                                     if (!detail::warpedSupportValid(image.size(), invalidIntegral, centre, warp, support)) continue;
@@ -824,6 +893,9 @@ namespace cgmli {
             }
             keypoints.swap(valid);
             if (keypoints.empty()) { descriptors.release(); return; }
+#ifdef CGMLI_ENABLE_CUDA_ORB
+            if(pyramid.cuda) { computeCuda(pyramid,keypoints,descriptors,geometry); return; }
+#endif
             if (options_.descriptorMode != OrbExtractorOptions::DescriptorMode::Standard) {
                 const auto& invalidIntegral=pyramid.invalidIntegrals;
                 // Reuse allocations, NEVER pixel values: every described layer is
@@ -897,7 +969,43 @@ namespace cgmli {
             orb->compute(gray, keypoints, descriptors);
         }
 
+#ifdef CGMLI_ENABLE_CUDA_ORB
+        void OrbFeatureExtractor::computeCuda(const Pyramid& pyramid,std::vector<cv::KeyPoint>& keypoints,
+            cv::OutputArray descriptors,const std::vector<KeypointGeometry>& geometry) {
+            std::vector<detail::OrbCudaPatch> patches;
+            std::vector<cv::KeyPoint> described;
+            patches.reserve(keypoints.size()); described.reserve(keypoints.size());
+            for(size_t i=0;i<keypoints.size();++i) {
+                const auto& point=keypoints[i];
+                const auto& prepared=geometry[i];
+                const Eigen::Vector2d centre(prepared.levelPixel.x,prepared.levelPixel.y);
+                const auto& warp=prepared.warp;
+                if(!detail::sparseSupportValid(pyramid.safeMasks[point.octave].size(),
+                    pyramid.invalidIntegrals[point.octave],centre,warp)) continue;
+                patches.push_back({centre.x(),centre.y(),warp(0,0),warp(0,1),warp(1,0),warp(1,1),
+                    point.octave,prepared.gravityAligned});
+                described.push_back(point);
+            }
+            const auto* results=pyramid.cuda->describe(patches,options_.keepCudaDescriptorRows);
+            cv::Mat result(static_cast<int>(patches.size()),32,CV_8UC1);
+            size_t accepted=0;
+            for(size_t i=0;i<patches.size();++i) {
+                if(!results[i].valid) continue;
+                auto point=described[i];
+                point.angle=cv::fastAtan2(results[i].c,results[i].a);
+                std::copy_n(results[i].bytes,32,result.ptr<uchar>(static_cast<int>(accepted)));
+                described[accepted++]=point;
+            }
+            described.resize(accepted);
+            keypoints.swap(described);
+            if(!accepted) descriptors.release();
+            else result.rowRange(0,static_cast<int>(accepted)).copyTo(descriptors);
+            cudaDescriptorRows_=pyramid.cuda->descriptorRows(accepted);
+        }
+#endif
+
         void OrbFeatureExtractor::detect(cv::InputArray image, std::vector<cv::KeyPoint>& keypoints, cv::InputArray mask) {
+            cudaDescriptorRows_.reset();
             lastTiming_={};
             const cv::Mat gray = grayscale(image);
             if (gray.empty()) { keypoints.clear(); return; }
@@ -913,6 +1021,7 @@ namespace cgmli {
         void OrbFeatureExtractor::detectAndCompute(cv::InputArray image, cv::InputArray mask,
             std::vector<cv::KeyPoint>& keypoints, cv::OutputArray descriptors,
             bool useProvidedKeypoints) {
+            cudaDescriptorRows_.reset();
             lastTiming_={}; const auto started=std::chrono::steady_clock::now();
             const auto milliseconds=[](const auto& start) { return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(); };
             const cv::Mat gray = grayscale(image);
@@ -920,6 +1029,48 @@ namespace cgmli {
             if (options_.descriptorMode != OrbExtractorOptions::DescriptorMode::Standard && !hasGravity_)
                 throw std::logic_error("Set ORB camera gravity before detecting/describing each frame");
             Pyramid pyramid; std::vector<KeypointGeometry> geometry;
+#ifdef CGMLI_ENABLE_CUDA_ORB
+            if(options_.useCuda && isCameraAware() && mask.empty() && gray.size()==cameraValidMask_.size()) {
+                const bool cacheHit=staticMasksReady_;
+                prepareStaticCaches();
+                if(cuda_) {
+                    auto working=useProvidedKeypoints?keypoints:std::vector<cv::KeyPoint>{};
+                    try {
+                        pyramid.cuda=cuda_.get();
+                        pyramid.images.resize(staticSafeMasks_.size()); // Device images have no cv::Mat view.
+                        pyramid.safeMasks=staticSafeMasks_;
+                        pyramid.invalidIntegrals=staticInvalidIntegrals_;
+                        pyramid.cellMasks=staticCellMasks_;
+                        cuda_->begin(gray.ptr<uchar>(),gray.step,!useProvidedKeypoints,
+                            options_.cudaEarlyIntegral && !useProvidedKeypoints && descriptors.needed());
+                        const double fastWall=cuda_->timing().fastMs+cuda_->timing().cornersDownloadMs;
+                        lastTiming_.pyramidMs=std::max(0.0,milliseconds(started)-fastWall);
+                        const auto detectionStarted=std::chrono::steady_clock::now();
+                        if(!useProvidedKeypoints) detectImpl(pyramid,working,geometry);
+                        lastTiming_.detectionMs=milliseconds(detectionStarted)+fastWall;
+                        const auto descriptorStarted=std::chrono::steady_clock::now();
+                        if(descriptors.needed()) computeImpl(gray,pyramid,working,descriptors,useProvidedKeypoints?nullptr:&geometry);
+                        lastTiming_.descriptorMs=milliseconds(descriptorStarted);
+                        const auto& gpu=cuda_->timing();
+                        lastTiming_.usedCuda=true;
+                        lastTiming_.maskCacheHit=cacheHit;
+                        lastTiming_.gpuUploadMs=gpu.uploadMs;
+                        lastTiming_.gpuPyramidMs=gpu.pyramidMs;
+                        lastTiming_.gpuFastMs=gpu.fastMs;
+                        lastTiming_.fastMs=gpu.fastMs;
+                        lastTiming_.gpuCornersDownloadMs=gpu.cornersDownloadMs;
+                        lastTiming_.gpuIntegralMs=gpu.integralMs;
+                        lastTiming_.gpuDescriptorMs=gpu.descriptorMs;
+                        lastTiming_.gpuDescriptorsDownloadMs=gpu.descriptorsDownloadMs;
+                        keypoints.swap(working);
+                        return;
+                    } catch(const detail::OrbCudaError& error) {
+                        disableCuda(error.what());
+                        lastTiming_={};
+                    }
+                }
+            }
+#endif
             buildPyramid(gray,mask,pyramid);
             lastTiming_.pyramidMs=milliseconds(started); const auto detectionStarted=std::chrono::steady_clock::now();
             if (!useProvidedKeypoints) detectImpl(pyramid,keypoints,geometry);

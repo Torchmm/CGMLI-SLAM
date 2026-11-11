@@ -279,10 +279,21 @@ namespace cgmli {
             options.matcher.maxHammingDistance = orbMatchingThreshold_;
             options.collectDebugMatches=params.output.display_matches;
             options.matchingThreads=size_t(std::max(1,params.frontend.num_matching_threads));
+            options.useCudaMatcher=params.frontend.orb_cuda_matcher;
             options.pyramidScale = orbOptions().scaleFactor;
             options.stagedMatching=options.stagedMatching && params.frontend.orb_staged_matching;
             options.replenishSeedGaps=options.replenishSeedGaps && isInitialized_ && !trackingLost_;
-            auto plan = frontend_association::propose(estimator, options);
+            if(isInitialized_ && !trackingLost_ && !kfPrior && options.stagedMatching) {
+                const auto prediction=estimator.pose(id);
+                for(auto it=estimator.window().order().rbegin();it!=estimator.window().order().rend();++it) {
+                    if(*it==id || !estimator.isKeyframe(*it)) continue;
+                    const auto reference=estimator.pose(*it);
+                    options.deferHealthyStereo=(prediction.r()-reference.r()).norm()<0.5*params.frontend.keyframe_translation &&
+                        prediction.q().angularDistance(reference.q())<0.5*params.frontend.keyframe_rotation;
+                    break;
+                }
+            }
+            auto plan = frontend_association::propose(estimator, options,framesInOut.get());
             const auto poseStarted=std::chrono::steady_clock::now();
             const auto milliseconds=[](const auto& start) { return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(); };
             // Validate older payloads against this frontend's actual sampling profile, not
@@ -317,47 +328,80 @@ namespace cgmli {
                 decision=PoseDecision{}; decision.T_WB=predicted;
                 return runRansac2d2d(estimator,plan,decision) && consistent(decision);
             };
-            bool accepted=solveProposal(); double retryPreparationMs=0;
-            if(!accepted && plan.stagedUsed) {
-                // A staged plan owns no backend state. Rebuild the complete legacy
-                // candidate set before declaring visual failure; no extra frame,
-                // frozen measurement or transaction is inserted for this retry.
-                auto previous=std::move(plan); options.stagedMatching=false;
+            double retryPreparationMs=0;
+            const auto retryProposal=[&](const auto& retryOptions) {
                 const auto retryStarted=std::chrono::steady_clock::now();
-                plan=frontend_association::propose(estimator,options);
-                for(const auto& item:plan.sources) orbFeatures_.validateFrame(*item.second);
-                retryPreparationMs=milliseconds(retryStarted);
+                auto retry=frontend_association::propose(estimator,retryOptions,framesInOut.get());
+                for(const auto& item:retry.sources) orbFeatures_.validateFrame(*item.second);
+                retryPreparationMs+=milliseconds(retryStarted);
+                return retry;
+            };
+            const auto addAttemptTiming=[&](const frontend_association::Plan& previous) {
                 plan.preparationMs+=previous.preparationMs; plan.matchingMs+=previous.matchingMs;
                 plan.assignmentMs+=previous.assignmentMs; plan.matchingJobs+=previous.matchingJobs;
+                plan.cudaMatchingJobs+=previous.cudaMatchingJobs;
+                plan.residentDescriptorSets+=previous.residentDescriptorSets;
                 plan.framePreparationMs+=previous.framePreparationMs; plan.mapPreparationMs+=previous.mapPreparationMs;
                 plan.rayPreparationMs+=previous.rayPreparationMs; plan.matchingSetupMs+=previous.matchingSetupMs;
                 plan.matchingTraversalMs+=previous.matchingTraversalMs; plan.matchingSelectionMs+=previous.matchingSelectionMs;
                 plan.matchingGuidanceMs+=previous.matchingGuidanceMs; plan.candidatePairs+=previous.candidatePairs;
                 plan.descriptorComparisons+=previous.descriptorComparisons; plan.mapJobs+=previous.mapJobs;
                 plan.seedJobs+=previous.seedJobs; plan.predictedQueries+=previous.predictedQueries;
-                plan.unpredictedQueries+=previous.unpredictedQueries; plan.poseFallback=true;
+                plan.unpredictedQueries+=previous.unpredictedQueries;
                 plan.ownedQueries+=previous.ownedQueries; plan.ownedMatches+=previous.ownedMatches;
                 plan.prioritySuppressed+=previous.prioritySuppressed;
-                plan.stagedUsed=previous.stagedUsed; plan.broadFallback=previous.broadFallback;
+                plan.stagedUsed=plan.stagedUsed || previous.stagedUsed;
+                plan.broadFallback=plan.broadFallback || previous.broadFallback;
                 plan.expansionJobs+=previous.expansionJobs; plan.broadJobs+=previous.broadJobs;
+                plan.deferredStereoJobs+=previous.deferredStereoJobs;
+            };
+            bool accepted=solveProposal();
+            if(!accepted && plan.stagedUsed) {
+                // Rebuild from the same frozen input before declaring visual failure.
+                auto previous=std::move(plan);
+                auto complete=options; complete.stagedMatching=false;
+                plan=retryProposal(complete);
+                addAttemptTiming(previous);
+                plan.poseFallback=true;
                 plan.stageFallbackReason="pose_consensus";
                 accepted=solveProposal();
             }
-            // A rejected visual pose must not leak into filtering or triangulation.
-            if(!accepted) { decision=PoseDecision{}; decision.T_WB=predicted; }
-            const double poseMs=milliseconds(poseStarted)-retryPreparationMs; const auto filteringStarted=std::chrono::steady_clock::now();
-            if (accepted) frontend_association::reject(plan, decision.rejected);
-            else {
-                // Preserve only tentative, uninitialized tracks when geometric consensus is
-                // unavailable. A failed pose solve must not add independent map residuals.
-                std::set<KeypointIdentifier> rejected;
-                for (const auto& observation : plan.batch.observations)
-                    if (estimator.isLandmarkInitialised(observation.landmark)) rejected.insert(observation.key);
-                frontend_association::reject(plan, rejected);
+            double filteringMs=0;
+            const auto filterAndClassify=[&]() {
+                const auto started=std::chrono::steady_clock::now();
+                if(accepted) frontend_association::reject(plan,decision.rejected);
+                else {
+                    decision=PoseDecision{}; decision.T_WB=predicted;
+                    std::set<KeypointIdentifier> rejected;
+                    for(const auto& observation:plan.batch.observations)
+                        if(estimator.isLandmarkInitialised(observation.landmark)) rejected.insert(observation.key);
+                    frontend_association::reject(plan,rejected);
+                }
+                frontend_association::filterMap(estimator,plan,decision.T_WB,options.maximumAngularError);
+                auto classification=frontend_association::decideKeyframe(estimator,*plan.current,decision.T_WB,params.frontend,accepted);
+                filteringMs+=milliseconds(started);
+                return classification;
+            };
+            auto keyframeDecision=filterAndClassify();
+            const bool stereoKeyframeRetry=accepted && keyframeDecision.keyframe && plan.deferredStereoJobs && !plan.poseFallback;
+            if(stereoKeyframeRetry) {
+                // A visual keyframe can disagree with the motion prediction. Restore
+                // all stereo pairs before publishing it. Keep the verified solution
+                // if additional matches fail consensus.
+                auto previous=std::move(plan);
+                auto previousDecision=decision;
+                auto fullStereo=options; fullStereo.deferHealthyStereo=false;
+                plan=retryProposal(fullStereo);
+                if(solveProposal()) {
+                    addAttemptTiming(previous);
+                    keyframeDecision=filterAndClassify();
+                } else {
+                    auto failed=std::move(plan);
+                    plan=std::move(previous); decision=std::move(previousDecision);
+                    addAttemptTiming(failed);
+                }
             }
-            frontend_association::filterMap(estimator, plan, decision.T_WB, options.maximumAngularError);
-            const double filteringMs=milliseconds(filteringStarted);
-            auto keyframeDecision=frontend_association::decideKeyframe(estimator,*plan.current,decision.T_WB,params.frontend,accepted);
+            const double poseMs=std::max(0.0,milliseconds(poseStarted)-retryPreparationMs-filteringMs);
             if(kfPrior) { keyframeDecision.keyframe=true; keyframeDecision.reason="explicit_prior"; }
             const bool keyframe=keyframeDecision.keyframe;
             // Every accepted frame may keep fresh seed identities. Only promotion
@@ -458,7 +502,8 @@ namespace cgmli {
                     <<" prepare_rays_ms="<<plan.rayPreparationMs
                     <<" match_ms="<<plan.matchingMs<<" assign_ms="<<plan.assignmentMs<<" pose_ms="<<poseMs
                     <<" filter_ms="<<filteringMs<<" triangulate_ms="<<triangulationMs<<" commit_ms="<<commitMs
-                    <<" jobs="<<plan.matchingJobs<<" threads="<<options.matchingThreads
+                    <<" jobs="<<plan.matchingJobs<<" cuda_jobs="<<plan.cudaMatchingJobs<<" threads="<<options.matchingThreads
+                    <<" device_descriptor_sets="<<plan.residentDescriptorSets
                     <<" candidate_tests="<<plan.candidatePairs<<" hamming_tests="<<plan.descriptorComparisons
                     <<" match_setup_sum_ms="<<plan.matchingSetupMs<<" match_traverse_sum_ms="<<plan.matchingTraversalMs
                     <<" match_select_sum_ms="<<plan.matchingSelectionMs
@@ -468,6 +513,7 @@ namespace cgmli {
                     <<" retired_seeds="<<plan.retiredSeeds
                     <<" staged="<<plan.stagedUsed<<" broad_fallback="<<plan.broadFallback<<" pose_fallback="<<plan.poseFallback
                     <<" map_jobs="<<plan.mapJobs<<" seed_jobs="<<plan.seedJobs
+                    <<" deferred_stereo_jobs="<<plan.deferredStereoJobs<<" stereo_keyframe_retry="<<stereoKeyframeRetry
                     <<" expansion_jobs="<<plan.expansionJobs<<" broad_jobs="<<plan.broadJobs
                     <<" fallback_reason="<<plan.stageFallbackReason
                     <<" total_ms="<<totalMs;

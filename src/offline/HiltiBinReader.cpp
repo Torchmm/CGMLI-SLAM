@@ -276,6 +276,7 @@ void HiltiBinReader::index() {
         <<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
 }
 HiltiBinReader::RawRecord HiltiBinReader::load(size_t record,bool readPayload) {
+    const std::lock_guard<std::mutex> lock(inputMutex_);
     const auto& expected=records_.at(record); auto& input=inputs_.at(expected.fileId); seek(input,expected.offset);
     std::array<uint8_t,32> bytes; readExact(input,bytes.data(),bytes.size());
     RawRecord result; result.index=header(bytes,expected.offset);

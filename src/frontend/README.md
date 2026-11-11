@@ -119,6 +119,8 @@ frontend_parameters:
   orb_fast_threshold: 20
   orb_layer_fast: true
   orb_staged_matching: true
+  orb_cuda_matcher: false
+  orb_cuda_early_integral: true
   orb_min_fast_threshold: 7
   orb_virtual_focal_length: 0.0
   orb_matching_threshold: 64

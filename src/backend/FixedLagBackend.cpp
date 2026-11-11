@@ -178,6 +178,13 @@ StepReport FixedLagBackend::step(std::optional<MarginalizationPolicy> policy,
         out.retiredState.reset(); out.retiredVisualPoints.clear(); out.optimizedVisualHistory.clear(); out.rejectedVisualObservations.clear(); return out;
     };
     const auto& newest=window_.epochs().at(window_.order().back());
+    const bool scoped=budget.latestTwoPoseVelocityOnly;
+    if(scoped && (!window_.canOptimizeLatestTwo() ||
+        (policy && *policy!=MarginalizationPolicy::MARGIN_SECOND_NEW))) {
+        out.message="two-frame solve requires a redundant epoch and a replayable IMU bridge";
+        return out;
+    }
+    const StateId penultimate=scoped?window_.order()[window_.size()-2]:StateId{};
     bool connected=false;
     const BlockKey newestPose=BlockKey::pose(newest.id);
     // Sensor packets may arrive independently. Do not publish an unconstrained latest
@@ -189,7 +196,7 @@ StepReport FixedLagBackend::step(std::optional<MarginalizationPolicy> policy,
     try {
         // Compute permission decisions from one immutable graph view, before changing any constant flags.
         std::map<BlockKey,bool> allow;
-        for (const auto& item:window_.graph_.blocks) if (item.first.isCalibration()) {
+        for (const auto& item:window_.graph_.blocks) if (!scoped && item.first.isCalibration()) {
             const bool camera=item.first.kind==BlockKind::CameraExtrinsic || item.first.kind==BlockKind::CameraTimeOffset;
             const bool healthy=(camera?newest.visual:newest.lidar)==SensorHealth::Valid;
             allow[item.first]=healthy && calibration && calibration(item.first,window_.graph_);
@@ -384,12 +391,15 @@ StepReport FixedLagBackend::step(std::optional<MarginalizationPolicy> policy,
                 LOG(WARNING)<<"[ImuReplayCheck] diagnostic replay failed; factor="<<worst<<" reason="<<e.what();
             }
         };
-        imuDiagnostics("pre_refresh");
+        if(!scoped) imuDiagnostics("pre_refresh");
         const auto refreshStarted=std::chrono::steady_clock::now();
         size_t refreshed=0;
         for(auto& item:window_.graph_.factors) {
             auto& f=item.second;
             if(f.kind!=FactorKind::Imu || !f.participates() || !f.imuReplay) continue;
+            if(scoped && std::none_of(f.keys.begin(),f.keys.end(),[&](BlockKey key) {
+                return key==newestPose || key==BlockKey::pose(penultimate);
+            })) continue;
             const auto first=window_.estimate(StateId(f.keys.front().id)),last=window_.estimate(StateId(f.keys[2].id));
             if(!first || !last) return rollback("native IMU refresh endpoint missing");
             // Match the legacy gyro repropagation threshold. Accelerometer drift
@@ -400,18 +410,15 @@ StepReport FixedLagBackend::step(std::optional<MarginalizationPolicy> policy,
         }
         const double refreshMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-refreshStarted).count();
         const auto* visualObservations=budget.collectCameraLandmarkCounts?&window_.landmarks():nullptr;
-        out.solve=optimizer_.optimizeImpl(window_.graph_,validateConnected,budget,false,visualObservations,newest.id);
+        if(scoped) out.solve=optimizer_.optimizeLatestTwo(window_.graph_,budget,visualObservations,penultimate,newest.id);
+        else out.solve=optimizer_.optimizeImpl(window_.graph_,validateConnected,budget,false,visualObservations,newest.id);
         out.solve.refreshedImuFactors=refreshed;
         out.solve.imuRefreshMs=refreshMs;
         if (!out.solve.accepted) return rollback(out.solve.message);
-        imuDiagnostics("post_solve");
+        if(scoped && !validateConnected(window_.graph_,out.message)) return rollback(out.message);
+        if(!scoped) imuDiagnostics("post_solve");
         const auto maintenanceStarted=std::chrono::steady_clock::now();
-        for(const auto& item:window_.landmarks().observations()) if(item.second.factorId) {
-            const auto factor=window_.graph_.factors.find(item.second.factorId);
-            if(factor!=window_.graph_.factors.end() && factor->second.lifecycle==FactorLifecycle::Rejected)
-                out.rejectedVisualObservations.push_back(item.first);
-        }
-        window_.collectTerminalFactors();
+        window_.collectTerminalFactors(&out.rejectedVisualObservations);
         // Eviction performs the final full domain validation on its private
         // candidate. Without eviction this is the publication boundary check.
         if(!window_.needsMarginalization() && !window_.valid(out.message)) return rollback(out.message);
@@ -442,6 +449,7 @@ StepReport FixedLagBackend::step(std::optional<MarginalizationPolicy> policy,
             out.marginalization=window_.marginalize(selected,reanchor);
             out.marginalizationMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-marginalizationStarted).count();
             if (!out.marginalization->success) return rollback("marginalization failed: "+out.marginalization->message);
+            if(scoped && !validateConnected(window_.graph_,out.message)) return rollback(out.message);
             // SECOND_NEW is a redundancy decision and never emits a normal map candidate.
             // OLD still requires valid LiDAR, keyframe status, and every external map gate.
             if (selected==MarginalizationPolicy::MARGIN_OLD && retired->keyframe

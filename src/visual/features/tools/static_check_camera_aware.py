@@ -100,7 +100,7 @@ for name, text, fragment in (
     ('candidate search replenishes until valid quota', extractor, 'if(valid.size()>=size_t(geometryQuota)) break'),
     ('prepared warp and geometry travel together', header, 'std::vector<KeypointGeometry>* detectedGeometry'),
     ('default branch skips tile work', extractor, 'continue; // Default path never allocates/filters a per-feature tile.'),
-    ('candidate support uses sparse backend', extractor, 'detail::sparseSupportValid(image.size(), invalidIntegral, centre, warp, pole)'),
+    ('candidate support uses sparse backend', extractor, 'detail::sparseSupportValid(imageSize, invalidIntegral, centre, warp, pole)'),
     ('zero-initialized unit-bearing LUT', extractor, 'rayDirections_ = cv::Mat::zeros(size, CV_32FC3)'),
     ('zero-initialized projection-Jacobian LUT', extractor, 'projectionJacobians_ = cv::Mat::zeros(size, CV_32FC(6))'),
     ('generic CameraBase projection Jacobian', extractor, 'camera_->project(bearing, &projected, &jacobian)'),
@@ -153,7 +153,8 @@ check('validity integrals have one shared construction site', extractor.count('d
 check('public calibration-only preparation entry', 'void prepareStaticCaches();' in header)
 prepare_body = extractor.split('void OrbFeatureExtractor::prepareStaticCaches() {', 1)[1].split('void OrbFeatureExtractor::buildPyramid', 1)[0]
 check('startup builds masks from calibration domain', 'buildMasks(cameraValidMask_,pyramid)' in prepare_body)
-check('startup static preparation is idempotent', 'if(staticMasksReady_) return;' in prepare_body)
+check('startup static preparation is idempotent', all(part in prepare_body for part in
+      ('if(!staticMasksReady_) {', 'buildMasks(cameraValidMask_,pyramid)', 'staticMasksReady_=true;')))
 check('startup does not build image pyramid or descriptors', not re.search(r'\b(buildPyramid|detectAndCompute|setExtractionDirection|integral)\s*\(', prepare_body))
 check('prepared first-image cache hit has regression coverage', 'Prepared first image must reuse static masks' in tests)
 check('detection reports FAST and geometric-filter timings', 'lastTiming_.fastMs+=' in extractor and 'lastTiming_.candidateFilterMs+=' in extractor)

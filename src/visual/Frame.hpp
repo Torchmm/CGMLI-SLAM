@@ -24,6 +24,7 @@
 
 /// \brief cgmli Main namespace of this package.
 namespace cgmli {
+namespace features::detail { struct OrbCudaDescriptorRows; }
 
 /// \class Frame
 /// \brief A single camera frame equipped with keypoint detector / extractor.
@@ -104,6 +105,10 @@ class Frame
 
   /// Descriptor row i belongs to keypoints()[i] after describe().
   inline const cv::Mat & descriptors() const { return descriptors_; }
+  const auto& cudaDescriptorRows() const { return cudaDescriptorRows_; }
+  void setCudaDescriptorRows(std::shared_ptr<const features::detail::OrbCudaDescriptorRows> rows) {
+      cudaDescriptorRows_=std::move(rows);
+  }
   /// Sampling-format provenance, not a claim about a descriptor's visual quality.
   /// External descriptor replacement invalidates it; the producer sets it afterwards.
   const std::string& descriptorProfile() const { return descriptorProfile_; }
@@ -145,6 +150,7 @@ class Frame
       // make sure things are set to zero for safety
       keypoints_.clear();
       descriptors_.release();
+      cudaDescriptorRows_.reset();
       descriptorProfile_.clear();
       invalidateFeatureCaches();
 
@@ -164,6 +170,7 @@ class Frame
   ///        That's a negligibly small overhead for many detections.
   /// \return The number of detected points.
   inline int describe() {
+      cudaDescriptorRows_.reset();
       invalidateFeatureCaches();
       // check initialisation
       CGMLI_ASSERT_TRUE_DBG(Exception, extractor_ != nullptr,
@@ -388,6 +395,7 @@ class Frame
   inline bool resetKeypoints(const std::vector<cv::KeyPoint> & keypoints) {
       keypoints_ = keypoints;
       descriptors_.release();
+      cudaDescriptorRows_.reset();
       descriptorProfile_.clear();
       invalidateFeatureCaches();
 
@@ -405,6 +413,7 @@ class Frame
   /// \return whether or not the operation was successful.
   inline bool resetDescriptors(const cv::Mat & descriptors) {
       descriptors_ = descriptors;
+      cudaDescriptorRows_.reset();
       descriptorProfile_.clear();
       return true;
   }
@@ -434,6 +443,7 @@ class Frame
   };
   std::shared_ptr<const BackProjectionCache> backProjectionCache_;
   cv::Mat descriptors_;  ///< we store the descriptors using OpenCV's matrices
+  std::shared_ptr<const features::detail::OrbCudaDescriptorRows> cudaDescriptorRows_;
   std::vector<uint64_t> landmarkIds_;  ///< landmark Id, if associated -- 0 otherwise
   std::vector<Eigen::Vector4d, Eigen::aligned_allocator<Eigen::Vector4d>> landmarks_; ///< pos in C.
   std::vector<bool> landmarkInitialisations_; ///< Store landmark initialisation stati.
