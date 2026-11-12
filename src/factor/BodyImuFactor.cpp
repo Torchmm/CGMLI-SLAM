@@ -82,6 +82,16 @@ Vector16 sensorCoordinates(const Vector16& x,const kinematics::Transformation& T
 }
 class FrozenImu final : public cgmli::ceres::ImuError {
 public:
+    void exportData(backend::detail::FrozenImuData& out) const {
+        const auto copy=[](const auto& value,double* target) { std::copy_n(value.data(),value.size(),target); };
+        out.duration=(t1_-t0_).toSec(); out.gravity=imuParameters_.g;
+        copy(Delta_q_.coeffs(),out.deltaQuaternion);
+        copy(acc_integral_,out.deltaVelocity); copy(acc_doubleintegral_,out.deltaPosition);
+        copy(speedAndBiases_ref_.tail<6>(),out.referenceBias);
+        copy(dalpha_db_g_,out.rotationGyro); copy(dv_db_g_,out.velocityGyro); copy(dp_db_g_,out.positionGyro);
+        copy(C_integral_,out.velocityAccel); copy(C_doubleintegral_,out.positionAccel);
+        copy(squareRootInformation_,out.whitening);
+    }
     const SpeedAndBias& reference() const { return speedAndBiases_ref_; }
     const Eigen::Matrix<double,15,15>& covariance() const { return P_delta_; }
     Eigen::Matrix<double,15,1> unwhiten(const Eigen::Matrix<double,15,1>& r) const {
@@ -109,6 +119,12 @@ public:
 };
 class BodyImuCost final : public ::ceres::SizedCostFunction<15,7,9,7,9> {
 public:
+    void exportData(backend::detail::FrozenImuData& out) const {
+        cost_->exportData(out);
+        const auto q=T_BS_.q().coeffs(); const auto p=T_BS_.r();
+        std::copy_n(q.data(),4,out.sensorQuaternion); std::copy_n(p.data(),3,out.sensorPosition);
+        for(int i=0;i<2;++i) std::copy_n(gyro_[i].data(),3,out.gyros+3*i);
+    }
     bool needsRefresh(const SpeedAndBias& sb,double gyro,double accel) const {
         const auto delta=sb-cost_->reference();
         return delta.segment<3>(3).norm()>gyro || delta.tail<3>().norm()>accel;
@@ -190,6 +206,12 @@ class SuppressedImuCost final : public ::ceres::SizedCostFunction<15,7,9,7,9> {
 }
 bool diagnoseBodyImu(const ::ceres::CostFunction& cost,double const* const* x,BodyImuDiagnostics& out) {
     const auto native=dynamic_cast<const BodyImuCost*>(&cost); return native && native->diagnose(x,out);
+}
+bool exportFrozenImu(const ::ceres::CostFunction& cost,backend::detail::FrozenImuData& out) {
+    const auto* native=dynamic_cast<const BodyImuCost*>(&cost);
+    if(!native) return false;
+    native->exportData(out);
+    return true;
 }
 bool checkBodyImuJacobians(const ::ceres::CostFunction& cost,double const* const* x,BodyImuJacobianCheck& out) {
     out=BodyImuJacobianCheck();

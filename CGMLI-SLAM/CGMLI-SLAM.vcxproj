@@ -243,12 +243,18 @@
     </CudaCompile>
     <ClInclude Include="..\src\backend\VisualBatchAudit.hpp" />
     <ClInclude Include="..\src\backend\VisualCudaBatch.hpp" />
+    <ClInclude Include="..\src\backend\GpuRetainedFactors.hpp" />
+    <ClInclude Include="..\src\backend\GpuRetainedPacking.hpp" />
+    <ClInclude Include="..\src\backend\GpuRetainedFactorMath.hpp" />
     <ClInclude Include="..\src\backend\VisualSphereBatchMath.hpp" />
     <ClInclude Include="..\src\common\CudaArray.hpp" />
     <ClInclude Include="..\src\backend\WindowVisualFactor.hpp" />
     <None Include="..\src\backend\legacy\ViSlamBackend.hpp.reference" />
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(CgmliCudaOrb)'=='true'">
+    <Link>
+      <AdditionalDependencies>cusolver.lib;cublas.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
     <ClCompile>
       <PreprocessorDefinitions>CGMLI_ENABLE_CUDA_ORB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>

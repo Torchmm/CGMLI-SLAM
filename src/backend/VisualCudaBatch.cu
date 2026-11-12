@@ -1,6 +1,10 @@
 #include "VisualSphereBatchMath.hpp"
+#include "GpuRetainedFactorMath.hpp"
 #include <common/CudaArray.hpp>
+#include <cusolverDn.h>
+#include <cublas_v2.h>
 #include <algorithm>
+#include <cmath>
 
 namespace cgmli::backend::detail {
 namespace {
@@ -156,15 +160,183 @@ __global__ void subtractPointSchur(const double* cross,const double* diagonal,co
     }
 }
 
-__global__ void packRangeSystem(const double* cross,const double* diagonal,const double* g,
-    const int* offsets,const int* support,int nr,int ne,double* packed) {
-    const int point=int(blockIdx.x),thread=int(threadIdx.x);
-    if(thread==0) {
-        packed[point]=diagonal[point];
-        packed[ne+point]=g[nr+point];
+__global__ void prepareStateSolve(const double* retainedH,const double* retainedG,int n,double lambda,
+    double* reduced,double* delta) {
+    const int i=int(blockIdx.x*blockDim.x+threadIdx.x);
+    if(i<n*n) {
+        reduced[i]+=retainedH[i];
+        if(i%(n+1)==0) reduced[i]+=lambda*fmax(reduced[n*(n+1)+i/(n+1)]+retainedH[i],1e-6);
+    } else if(i<n*(n+1)) {
+        delta[i-n*n]=-(reduced[i]+retainedG[i-n*n]);
     }
-    for(int i=offsets[point]+thread;i<offsets[point+1];i+=int(blockDim.x))
-        packed[2*ne+i]=cross[point*nr+support[i]];
+}
+
+__global__ void clampStateStep(double* delta,int n,const double* lower,const double* upper) {
+    const int i=int(blockIdx.x*blockDim.x+threadIdx.x);
+    if(i<n && isfinite(delta[i])) delta[i]=fmax(lower[i],fmin(upper[i],delta[i]));
+}
+
+__global__ void statePrediction(const double* pose,const double* g,const double* retainedH,const double* retainedG,
+    const double* delta,int n,double* prediction) {
+    const int i=int(blockIdx.x*blockDim.x+threadIdx.x);
+    double contribution=0;
+    if(i<n) {
+        double hd=0;
+        for(int j=0;j<n;++j) hd+=(pose[min(i,j)*n+max(i,j)]+retainedH[i*n+j])*delta[j];
+        contribution=-delta[i]*(g[i]+retainedG[i]+0.5*hd);
+    }
+    sumBlock(contribution,prediction);
+}
+
+__global__ void backSubstitute(const double* cross,const double* diagonal,const double* g,
+    const int* offsets,const int* support,int nr,int ne,double lambda,const double* lower,const double* upper,
+    double* delta,double* prediction) {
+    const int k=int(blockIdx.x*blockDim.x+threadIdx.x);
+    double contribution=0;
+    if(k<ne) {
+        double c=0;
+        for(int j=offsets[k];j<offsets[k+1];++j) c+=cross[k*nr+support[j]]*delta[support[j]];
+        const int i=nr+k;
+        const double d=-(g[i]+c)/dampedPoint(diagonal[k],lambda);
+        delta[i]=isfinite(d)?fmax(lower[i],fmin(upper[i],d)):d;
+        contribution=-delta[i]*(g[i]+c+0.5*diagonal[k]*delta[i]);
+    }
+    sumBlock(contribution,prediction);
+}
+
+__global__ void evaluateImuFactors(const GpuImuFactor* factors,int count,const double* values,int n,
+    double* residual,double* jacobian,int* invalid) {
+    const int i=int(blockIdx.x*blockDim.x+threadIdx.x);
+    if(i>=count) return;
+    const auto& f=factors[i];
+    if(!retained_math::evaluateImu(f,values,n,residual+f.firstRow,
+        jacobian?jacobian+f.firstRow*n:nullptr)) atomicExch(invalid,1);
+}
+
+__global__ void priorCharts(const GpuPriorBlock* blocks,int count,const double* data,const double* values,
+    double* chart,double* derivatives) {
+    const int i=int(blockIdx.x*blockDim.x+threadIdx.x);
+    if(i>=count) return;
+    const auto& b=blocks[i];
+    const auto& state=b.state;
+    const double* x=values+state.offset;
+    const double* ref=data+b.reference;
+    double* d=chart+b.chartOffset;
+    if(state.chart==GpuChart::Euclidean) {
+        for(int c=0;c<b.tangentSize;++c) d[c]=x[c]-ref[c];
+    } else retained_math::poseMinus(x,ref,d);
+    if(!derivatives || !state.width) return;
+    double* D=derivatives+9*b.chartOffset;
+    if(state.chart==GpuChart::Euclidean) {
+        for(int r=0;r<b.tangentSize;++r) for(int c=0;c<state.width;++c) D[9*r+c]=double(r==c);
+        return;
+    }
+    // Differentiate only the current chart, just as the host FEJ prior does.
+    constexpr double h=1e-7;
+    double step[6]{},plus[7],minus[7],dp[6],dm[6];
+    const bool rotationOnly=state.chart==GpuChart::RotationOnly;
+    for(int c=0;c<state.width;++c) {
+        step[c]=h; retained_math::posePlus(x,step,plus,rotationOnly);
+        step[c]=-h; retained_math::posePlus(x,step,minus,rotationOnly);
+        step[c]=0;
+        retained_math::poseMinus(plus,ref,dp);
+        retained_math::poseMinus(minus,ref,dm);
+        for(int r=0;r<6;++r) D[9*r+c]=(dp[r]-dm[r])/(2*h);
+    }
+}
+
+__global__ void evaluatePriorRows(const GpuPriorFactor* factors,const GpuPriorBlock* blocks,const double* data,
+    const double* chart,const double* derivatives,int n,double* residual,double* jacobian) {
+    const auto& f=factors[blockIdx.x];
+    for(int r=int(threadIdx.x);r<f.rows;r+=int(blockDim.x)) {
+        const double* A=data+f.matrix+r*f.columns;
+        double value=data[f.residual+r];
+        for(int c=0;c<f.columns;++c) value+=A[c]*chart[f.chartOffset+c];
+        residual[f.firstRow+r]=value;
+        if(!jacobian) continue;
+        for(int b=0;b<f.blockCount;++b) {
+            const auto& block=blocks[f.firstBlock+b];
+            const double* D=derivatives+9*block.chartOffset;
+            const double* a=A+block.chartOffset-f.chartOffset;
+            for(int c=0;c<block.state.width;++c) {
+                double d=0;
+                for(int j=0;j<block.tangentSize;++j) d+=a[j]*D[9*j+c];
+                jacobian[(f.firstRow+r)*n+block.state.column+c]=d;
+            }
+        }
+    }
+}
+
+__global__ void retainedCost(const double* residual,int rows,double* cost,int* invalid) {
+    const int i=int(blockIdx.x*blockDim.x+threadIdx.x);
+    double contribution=0;
+    if(i<rows) {
+        contribution=0.5*residual[i]*residual[i];
+        if(!isfinite(contribution)) atomicExch(invalid,1);
+    }
+    sumBlock(contribution,cost);
+}
+
+__global__ void accumulateRetained(const double* J,const double* r,int rows,int n,double* H,double* g) {
+    const int i=int(blockIdx.x*blockDim.x+threadIdx.x);
+    if(i>=n*(n+1)) return;
+    const int column=i%n,other=i/n;
+    if(other<n && other>column) return;
+    double product=0;
+    for(int k=0;k<rows;++k) product+=J[k*n+column]*(other==n?r[k]:J[k*n+other]);
+    if(other==n) g[column]+=product;
+    else H[i]+=product;
+}
+
+__global__ void prepareResidentVariables(const GpuVariable* variables,int count,const double* values,
+    const double* absoluteLower,const double* absoluteUpper,double* lower,double* upper,double* lifts) {
+    const int i=int(blockIdx.x*blockDim.x+threadIdx.x);
+    if(i>=count) return;
+    const auto& v=variables[i]; const auto& b=v.state;
+    const auto* x=values+b.offset;
+    for(int j=0;j<b.width;++j) {
+        lower[b.column+j]=absoluteLower[b.column+j]-x[j];
+        upper[b.column+j]=absoluteUpper[b.column+j]-x[j];
+    }
+    auto* J=lifts+v.lift;
+    for(int k=0;k<b.width*b.size;++k) J[k]=0;
+    if(b.chart==GpuChart::Euclidean) {
+        for(int j=0;j<b.width;++j) J[j*b.width+j]=1;
+        return;
+    }
+    const int rotation=b.chart==GpuChart::LeftSE3?3:0;
+    if(rotation) {
+        const retained_math::M3 cross=-retained_math::skewMatrix(Eigen::Map<const retained_math::V3>(x));
+        for(int r=0;r<3;++r) {
+            J[r*b.width+r]=1;
+            for(int c=0;c<3;++c) J[r*b.width+3+c]=cross(r,c);
+        }
+    }
+    const Eigen::Map<const Eigen::Quaterniond> q(x+3);
+    const retained_math::M3 top=0.5*(q.w()*retained_math::M3::Identity()-retained_math::skewMatrix(q.vec()));
+    for(int c=0;c<3;++c) {
+        for(int r=0;r<3;++r) J[(r+3)*b.width+rotation+c]=top(r,c);
+        J[6*b.width+rotation+c]=-0.5*q.vec()[c];
+    }
+}
+
+__global__ void residentTrial(const GpuVariable* variables,int count,const double* accepted,const double* delta,
+    const double* lower,const double* upper,double* candidate,double* maximum,int* invalid) {
+    const int i=int(blockIdx.x*blockDim.x+threadIdx.x);
+    if(i>=count) return;
+    const auto& b=variables[i].state;
+    const auto* x=accepted+b.offset; const auto* d=delta+b.column;
+    auto* y=candidate+b.offset;
+    double norm=0;
+    for(int k=0;k<b.width;++k) {
+        if(!isfinite(d[k])) { atomicExch(invalid,1); return; }
+        norm=fmax(norm,fabs(d[k]));
+    }
+    atomicMax(reinterpret_cast<unsigned long long*>(maximum),static_cast<unsigned long long>(__double_as_longlong(norm)));
+    if(b.chart==GpuChart::Euclidean) {
+        for(int k=0;k<b.width;++k) y[k]=fmax(lower[b.column+k],fmin(upper[b.column+k],x[k]+d[k]));
+    } else retained_math::posePlus(x,d,y,b.chart==GpuChart::RotationOnly);
+    for(int k=0;k<b.size;++k) if(!isfinite(y[k])) atomicExch(invalid,1);
 }
 }
 
@@ -176,27 +348,46 @@ struct VisualCudaBatch::Impl {
     cuda::Array<double,true> hostParameters;
     cuda::Array<double,true> hostJacobians;
     cuda::Array<VisualBatchResidual,true> hostResiduals;
-    // Online Schur buffers are retained by the backend workspace. Only the
-    // reduced state system and compressed range blocks cross to the host.
+    // Keep the normal equations, reduced system and point cross blocks on the device.
+    cusolverDnHandle_t solver=nullptr;
     cuda::Array<DirectVisualLayout> layout;
     cuda::Array<int> rows,columns,offsets,support,invalid;
-    cuda::Array<double> lifts,tangent,whiteResiduals,pose,cross,diagonal,gradient,reduced,rangeSystem,metric;
+    cuda::Array<double> lifts,tangent,whiteResiduals,pose,cross,diagonal,gradient,reduced,metric;
+    cuda::Array<double> retainedH,retainedG,lower,upper,step,solverWork;
+    cuda::Array<GpuImuFactor> imuFactors;
+    cuda::Array<GpuPriorFactor> priorFactors;
+    cuda::Array<GpuPriorBlock> priorBlocks;
+    cuda::Array<double> priorData,retainedResidual,retainedJacobian,chart,chartDerivative;
+    cuda::Array<GpuImuFactor,true> hostImuFactors;
+    cuda::Array<GpuPriorFactor,true> hostPriorFactors;
+    cuda::Array<GpuPriorBlock,true> hostPriorBlocks;
+    cuda::Array<double,true> hostPriorData;
+    cuda::Array<GpuVariable> variables;
+    cuda::Array<GpuVariable,true> hostVariables;
+    cuda::Array<double> candidate,absoluteLower,absoluteUpper;
+    cuda::Array<int> solverInfo;
     cuda::Array<VisualBatchInput,true> hostInputs;
     cuda::Array<DirectVisualLayout,true> hostLayout;
     cuda::Array<int,true> hostRows,hostColumns,hostOffsets,hostSupport;
-    cuda::Array<double,true> hostLifts,hostReduced,hostRangeSystem;
+    cuda::Array<double,true> hostLifts,hostRetainedH,hostRetainedG,hostLower,hostUpper,hostStep,hostMetrics;
     cuda::Array<int,true> hostInvalid;
-    int retained=0,eliminated=0,visualRows=0,rangeSystemSize=0;
+    int retained=0,eliminated=0,visualRows=0,solverWorkSize=0,solverDimension=0;
+    int imuCount=0,priorCount=0,priorBlockCount=0,retainedRows=0,residentCount=0;
+    std::size_t parameterSize=0;
     bool pending=false;
     bool finishPending() {
         if(!pending) return true;
         pending=false;
         return cudaStreamSynchronize(stream)==cudaSuccess;
     }
+    bool evaluateRetained(const double* values,bool derivatives,int metricIndex,int invalidIndex);
+    bool launchVisualLinearization();
+    bool launchTrial(const double* values,int metricIndex);
     Impl() { cudaStreamCreateWithFlags(&stream,cudaStreamNonBlocking); }
     ~Impl() {
         if(stream) {
             cudaStreamSynchronize(stream);
+            if(solver) cusolverDnDestroy(solver);
             cudaStreamDestroy(stream);
         }
     }
@@ -204,6 +395,11 @@ struct VisualCudaBatch::Impl {
 
 VisualCudaBatch::VisualCudaBatch():impl_(std::make_unique<Impl>()) {}
 VisualCudaBatch::~VisualCudaBatch()=default;
+
+const char* takeVisualCudaRuntimeError() {
+    const auto status=cudaGetLastError();
+    return status==cudaSuccess?nullptr:cudaGetErrorString(status);
+}
 
 bool VisualCudaBatch::evaluate(const std::vector<VisualBatchInput>& inputs,const std::vector<double>& values,
     bool topologyChanged,bool derivatives,std::size_t jacobianSize,VisualBatchView& result) {
@@ -240,7 +436,7 @@ bool VisualCudaBatch::linearizeSchur(const std::vector<VisualBatchInput>& factor
     auto& s=*impl_;
     const auto count=factors.size();
     const int n=nr+ne,rowCount=int(2*count);
-    if(!s.stream || !s.finishPending() || !count || count>1000000 || nr<=0 || nr>512 || ne<=0 || n>4000 ||
+    if(!s.stream || !s.finishPending() || count>1000000 || nr<=0 || ne<0 || n>4000 ||
         factors.size()!=layout.size()) return false;
     const auto reserve=[](auto& buffer,std::size_t needed) {
         std::size_t capacity=1;
@@ -252,6 +448,7 @@ bool VisualCudaBatch::linearizeSchur(const std::vector<VisualBatchInput>& factor
     };
     std::vector<int> rows,columns,offsets,support;
     if(newTopology) {
+        s.residentCount=0;
         rows.push_back(0); offsets.push_back(0);
         std::vector<std::vector<int>> pointColumns(ne);
         std::vector<int> factorColumns;
@@ -290,68 +487,257 @@ bool VisualCudaBatch::linearizeSchur(const std::vector<VisualBatchInput>& factor
             !prepare(s.support,s.hostSupport,support.size()) || !prepare(s.inputs,s.hostInputs,count) ||
             !reserve(s.tangent,columns.size())) return false;
         s.retained=nr; s.eliminated=ne; s.visualRows=rowCount;
-        s.rangeSystemSize=2*ne+int(support.size());
     } else if(nr!=s.retained || ne!=s.eliminated || rowCount!=s.visualRows) return false;
     if(!prepare(s.parameters,s.hostParameters,values.size()) || !prepare(s.lifts,s.hostLifts,plus.size()) ||
         !reserve(s.jacobians,jacobianSize) || !reserve(s.residuals,count) ||
         !reserve(s.pose,nr*nr) || !reserve(s.cross,nr*ne) || !reserve(s.diagonal,ne) ||
-        !reserve(s.gradient,n) || !reserve(s.whiteResiduals,rowCount) || !s.invalid.reserve(1) ||
-        !s.metric.reserve(1) || !reserve(s.reduced,nr*(nr+2)) ||
-        !reserve(s.hostReduced,nr*(nr+2)+1) || !prepare(s.rangeSystem,s.hostRangeSystem,s.rangeSystemSize) ||
-        !s.hostInvalid.reserve(1)) return false;
+        !reserve(s.gradient,n) || !reserve(s.whiteResiduals,rowCount) || !s.invalid.reserve(2) ||
+        !s.metric.reserve(4) || !reserve(s.reduced,nr*(nr+2)) || !s.hostInvalid.reserve(4)) return false;
     const auto upload=[&](auto& buffer,auto& pinned,const auto& data) {
         if(data.empty()) return true;
         std::copy(data.begin(),data.end(),pinned.data());
         return cudaMemcpyAsync(buffer.data(),pinned.data(),data.size()*sizeof(data[0]),cudaMemcpyHostToDevice,s.stream)==cudaSuccess;
     };
-    const auto zero=[&](auto& buffer,std::size_t size) {
-        return cudaMemsetAsync(buffer.data(),0,size*sizeof(*buffer.data()),s.stream)==cudaSuccess;
-    };
     s.pending=true;
+    s.parameterSize=values.size();
     // Pinned copies keep topology and values alive through reduceOnline(),
     // without a pageable staging wait before the CPU starts its own factors.
-    bool ok=(!newTopology || (upload(s.rows,s.hostRows,rows) && upload(s.columns,s.hostColumns,columns) &&
+    const bool ok=(!newTopology || (upload(s.rows,s.hostRows,rows) && upload(s.columns,s.hostColumns,columns) &&
         upload(s.layout,s.hostLayout,layout) && upload(s.offsets,s.hostOffsets,offsets) &&
         upload(s.support,s.hostSupport,support) && upload(s.inputs,s.hostInputs,factors))) &&
-        upload(s.lifts,s.hostLifts,plus) && upload(s.parameters,s.hostParameters,values) &&
-        zero(s.pose,nr*nr) && zero(s.cross,nr*ne) && zero(s.diagonal,ne) &&
-        zero(s.gradient,n) && zero(s.metric,1) && zero(s.invalid,1);
-    if(ok) {
-        const auto blocks=(count+127)/128;
-        evaluateVisual<<<blocks,128,0,s.stream>>>(s.inputs.data(),int(count),s.parameters.data(),
-            s.residuals.data(),s.jacobians.data());
-        projectVisualRows<<<blocks,128,0,s.stream>>>(s.inputs.data(),s.layout.data(),s.lifts.data(),
-            s.residuals.data(),s.jacobians.data(),s.rows.data(),int(count),s.tangent.data(),s.whiteResiduals.data());
-        accumulateVisualPairs<<<blocks,128,0,s.stream>>>(s.rows.data(),s.columns.data(),s.tangent.data(),
-            s.whiteResiduals.data(),int(count),nr,s.pose.data(),s.cross.data(),s.diagonal.data(),s.gradient.data());
-        packRangeSystem<<<ne,32,0,s.stream>>>(s.cross.data(),s.diagonal.data(),s.gradient.data(),
-            s.offsets.data(),s.support.data(),nr,ne,s.rangeSystem.data());
-        visualCost<<<blocks,128,0,s.stream>>>(s.residuals.data(),s.layout.data(),int(count),s.metric.data(),s.invalid.data());
-        ok=cudaGetLastError()==cudaSuccess;
-    }
+        upload(s.lifts,s.hostLifts,plus) && upload(s.parameters,s.hostParameters,values) && s.launchVisualLinearization();
     if(!ok) s.finishPending();
     return ok;
 }
 
-bool VisualCudaBatch::reduceOnline(double lambda,VisualReducedSystem& out) {
+bool VisualCudaBatch::Impl::launchVisualLinearization() {
+    const auto zero=[&](auto& buffer,std::size_t size) {
+        return !size || cudaMemsetAsync(buffer.data(),0,size*sizeof(*buffer.data()),stream)==cudaSuccess;
+    };
+    const int nr=retained,ne=eliminated,count=visualRows/2,blocks=(count+127)/128;
+    if(!zero(pose,nr*nr) || !zero(cross,nr*ne) || !zero(diagonal,ne) || !zero(gradient,nr+ne) ||
+        !zero(metric,1) || !zero(invalid,1)) return false;
+    if(!count) return true;
+    evaluateVisual<<<blocks,128,0,stream>>>(inputs.data(),count,parameters.data(),residuals.data(),jacobians.data());
+    projectVisualRows<<<blocks,128,0,stream>>>(inputs.data(),layout.data(),lifts.data(),residuals.data(),jacobians.data(),
+        rows.data(),count,tangent.data(),whiteResiduals.data());
+    accumulateVisualPairs<<<blocks,128,0,stream>>>(rows.data(),columns.data(),tangent.data(),whiteResiduals.data(),count,nr,
+        pose.data(),cross.data(),diagonal.data(),gradient.data());
+    visualCost<<<blocks,128,0,stream>>>(residuals.data(),layout.data(),count,metric.data(),invalid.data());
+    return cudaGetLastError()==cudaSuccess;
+}
+
+bool VisualCudaBatch::solveOnline(double lambda,const double* retainedH,const double* retainedG,
+    const std::vector<double>& lower,const std::vector<double>& upper,bool newPoint,VisualSchurStep& out) {
     out={};
     auto& s=*impl_;
-    const int nr=s.retained,ne=s.eliminated,size=nr*(nr+2);
-    initializeReduced<<<(size+127)/128,128,0,s.stream>>>(s.pose.data(),s.gradient.data(),nr,s.reduced.data());
-    subtractPointSchur<<<ne,128,0,s.stream>>>(s.cross.data(),s.diagonal.data(),s.gradient.data(),
-        s.offsets.data(),s.support.data(),nr,lambda,s.reduced.data());
-    const bool ok=cudaGetLastError()==cudaSuccess &&
-        cudaMemcpyAsync(s.hostReduced.data(),s.reduced.data(),size*sizeof(double),cudaMemcpyDeviceToHost,s.stream)==cudaSuccess &&
-        (!s.pending || cudaMemcpyAsync(s.hostRangeSystem.data(),s.rangeSystem.data(),
-            s.rangeSystemSize*sizeof(double),cudaMemcpyDeviceToHost,s.stream)==cudaSuccess) &&
-        cudaMemcpyAsync(s.hostReduced.data()+size,s.metric.data(),sizeof(double),cudaMemcpyDeviceToHost,s.stream)==cudaSuccess &&
-        cudaMemcpyAsync(s.hostInvalid.data(),s.invalid.data(),sizeof(int),cudaMemcpyDeviceToHost,s.stream)==cudaSuccess;
+    const int nr=s.retained,ne=s.eliminated,n=nr+ne,size=nr*(nr+2);
+    if(nr<=0 || !std::isfinite(lambda) || lambda<=0 || lower.size()!=std::size_t(n) || upper.size()!=lower.size()) return false;
+    if(!s.solver) {
+        if(cusolverDnCreate(&s.solver)!=CUSOLVER_STATUS_SUCCESS) return false;
+        if(cusolverDnSetStream(s.solver,s.stream)!=CUSOLVER_STATUS_SUCCESS) {
+            cusolverDnDestroy(s.solver); s.solver=nullptr; return false;
+        }
+    }
+    if(s.solverDimension!=nr) {
+        int work=0;
+        if(cusolverDnDpotrf_bufferSize(s.solver,CUBLAS_FILL_MODE_LOWER,nr,s.reduced.data(),nr,&work)!=CUSOLVER_STATUS_SUCCESS ||
+            work<1 || !s.solverWork.reserve(work)) return false;
+        s.solverDimension=nr; s.solverWorkSize=work;
+    }
+    if(!s.retainedH.reserve(nr*nr) || !s.retainedG.reserve(nr) || !s.lower.reserve(n) || !s.upper.reserve(n) ||
+        !s.step.reserve(n) || !s.solverInfo.reserve(2) || !s.hostRetainedH.reserve(nr*nr) ||
+        !s.hostRetainedG.reserve(nr) || !s.hostLower.reserve(n) || !s.hostUpper.reserve(n) ||
+        !s.hostStep.reserve(n) || !s.hostMetrics.reserve(4)) return false;
+    const auto upload=[&](auto& device,auto& host,const double* data,int count) {
+        std::copy_n(data,count,host.data());
+        return cudaMemcpyAsync(device.data(),host.data(),count*sizeof(double),cudaMemcpyHostToDevice,s.stream)==cudaSuccess;
+    };
     s.pending=true;
-    if(!s.finishPending() || !ok || *s.hostInvalid.data()) return false;
-    out={s.hostReduced.data(),s.hostReduced.data()+nr*nr,s.hostReduced.data()+nr*(nr+1),
-        s.hostRangeSystem.data(),s.hostRangeSystem.data()+ne,s.hostRangeSystem.data()+2*ne,
-        s.hostOffsets.data(),s.hostSupport.data(),s.hostReduced.data()[size]};
+    if(newPoint && (!(retainedH?upload(s.retainedH,s.hostRetainedH,retainedH,nr*nr):
+            cudaMemsetAsync(s.retainedH.data(),0,nr*nr*sizeof(double),s.stream)==cudaSuccess) ||
+        !(retainedG?upload(s.retainedG,s.hostRetainedG,retainedG,nr):
+            cudaMemsetAsync(s.retainedG.data(),0,nr*sizeof(double),s.stream)==cudaSuccess) ||
+        (!s.residentCount && (!upload(s.lower,s.hostLower,lower.data(),n) || !upload(s.upper,s.hostUpper,upper.data(),n))))) {
+        s.finishPending(); return false;
+    }
+    initializeReduced<<<(size+127)/128,128,0,s.stream>>>(s.pose.data(),s.gradient.data(),nr,s.reduced.data());
+    if(ne) subtractPointSchur<<<ne,128,0,s.stream>>>(s.cross.data(),s.diagonal.data(),s.gradient.data(),
+        s.offsets.data(),s.support.data(),nr,lambda,s.reduced.data());
+    prepareStateSolve<<<(nr*(nr+1)+127)/128,128,0,s.stream>>>(s.retainedH.data(),s.retainedG.data(),nr,lambda,
+        s.reduced.data(),s.step.data());
+    // Row-major upper triangle is the column-major lower triangle expected by cuSOLVER.
+    if(cudaGetLastError()!=cudaSuccess ||
+        cusolverDnDpotrf(s.solver,CUBLAS_FILL_MODE_LOWER,nr,s.reduced.data(),nr,s.solverWork.data(),
+            s.solverWorkSize,s.solverInfo.data())!=CUSOLVER_STATUS_SUCCESS ||
+        cusolverDnDpotrs(s.solver,CUBLAS_FILL_MODE_LOWER,nr,1,s.reduced.data(),nr,s.step.data(),nr,
+            s.solverInfo.data()+1)!=CUSOLVER_STATUS_SUCCESS ||
+        cudaMemsetAsync(s.metric.data()+1,0,sizeof(double),s.stream)!=cudaSuccess) { s.finishPending(); return false; }
+    clampStateStep<<<(nr+127)/128,128,0,s.stream>>>(s.step.data(),nr,s.lower.data(),s.upper.data());
+    statePrediction<<<(nr+127)/128,128,0,s.stream>>>(s.pose.data(),s.gradient.data(),s.retainedH.data(),
+        s.retainedG.data(),s.step.data(),nr,s.metric.data()+1);
+    if(ne) backSubstitute<<<(ne+127)/128,128,0,s.stream>>>(s.cross.data(),s.diagonal.data(),s.gradient.data(),
+        s.offsets.data(),s.support.data(),nr,ne,lambda,s.lower.data(),s.upper.data(),s.step.data(),s.metric.data()+1);
+    const auto download=[&](auto* host,const auto* device,std::size_t count) {
+        return cudaMemcpyAsync(host,device,count*sizeof(*device),cudaMemcpyDeviceToHost,s.stream)==cudaSuccess;
+    };
+    bool ok=cudaGetLastError()==cudaSuccess;
+    if(ok && s.residentCount) {
+        ok=cudaMemsetAsync(s.metric.data()+3,0,sizeof(double),s.stream)==cudaSuccess &&
+            cudaMemsetAsync(s.invalid.data()+1,0,sizeof(int),s.stream)==cudaSuccess &&
+            cudaMemcpyAsync(s.candidate.data(),s.parameters.data(),s.parameterSize*sizeof(double),cudaMemcpyDeviceToDevice,s.stream)==cudaSuccess;
+        if(ok) {
+            residentTrial<<<(s.residentCount+127)/128,128,0,s.stream>>>(s.variables.data(),s.residentCount,s.parameters.data(),
+                s.step.data(),s.absoluteLower.data(),s.absoluteUpper.data(),s.candidate.data(),s.metric.data()+3,s.invalid.data()+1);
+            ok=s.launchTrial(s.candidate.data(),2);
+        }
+    } else if(ok) ok=download(s.hostStep.data(),s.step.data(),n);
+    ok=ok && download(s.hostMetrics.data(),s.metric.data(),s.residentCount?4:2) &&
+        download(s.hostInvalid.data(),s.invalid.data(),s.residentCount?2:1) && download(s.hostInvalid.data()+2,s.solverInfo.data(),2);
+    if(!s.finishPending() || !ok || s.hostInvalid.data()[0] || s.hostInvalid.data()[2] || s.hostInvalid.data()[3]) return false;
+    out.cost=s.hostMetrics.data()[0]; out.predictedReduction=s.hostMetrics.data()[1];
+    if(s.residentCount) {
+        out.maxIncrement=s.hostMetrics.data()[3]; out.trialCost=s.hostMetrics.data()[2];
+        out.trialValid=!s.hostInvalid.data()[1] && std::isfinite(out.trialCost);
+    } else out.increment=s.hostStep.data();
     return true;
+}
+
+bool VisualCudaBatch::configureRetained(const GpuRetainedFactors& problem) {
+    auto& s=*impl_;
+    s.imuCount=int(problem.imu.size()); s.priorCount=int(problem.priors.size());
+    s.priorBlockCount=int(problem.priorBlocks.size()); s.retainedRows=problem.rows;
+    const auto upload=[&](auto& device,auto& host,const auto& data) {
+        if(data.empty()) return true;
+        if(!device.reserve(data.size()) || !host.reserve(data.size())) return false;
+        std::copy(data.begin(),data.end(),host.data());
+        return cudaMemcpyAsync(device.data(),host.data(),data.size()*sizeof(data[0]),cudaMemcpyHostToDevice,s.stream)==cudaSuccess;
+    };
+    if(!problem.rows) return true;
+    if(!s.retainedResidual.reserve(problem.rows) || !s.retainedJacobian.reserve(std::size_t(problem.rows)*s.retained) ||
+        !s.chart.reserve(problem.chartSize) || !s.chartDerivative.reserve(9*problem.chartSize)) return false;
+    s.pending=true;
+    const bool ok=upload(s.imuFactors,s.hostImuFactors,problem.imu) && upload(s.priorFactors,s.hostPriorFactors,problem.priors) &&
+        upload(s.priorBlocks,s.hostPriorBlocks,problem.priorBlocks) && upload(s.priorData,s.hostPriorData,problem.priorData);
+    if(!ok) s.finishPending();
+    return ok;
+}
+
+bool VisualCudaBatch::Impl::evaluateRetained(const double* values,bool derivatives,int metricIndex,int invalidIndex) {
+    if(!retainedRows) return true;
+    auto* J=derivatives?retainedJacobian.data():nullptr;
+    if(J && cudaMemsetAsync(J,0,std::size_t(retainedRows)*retained*sizeof(double),stream)!=cudaSuccess) return false;
+    if(imuCount) evaluateImuFactors<<<(imuCount+31)/32,32,0,stream>>>(imuFactors.data(),imuCount,values,retained,
+        retainedResidual.data(),J,invalid.data()+invalidIndex);
+    if(priorCount) {
+        priorCharts<<<(priorBlockCount+31)/32,32,0,stream>>>(priorBlocks.data(),priorBlockCount,priorData.data(),values,
+            chart.data(),derivatives?chartDerivative.data():nullptr);
+        evaluatePriorRows<<<priorCount,128,0,stream>>>(priorFactors.data(),priorBlocks.data(),priorData.data(),chart.data(),
+            chartDerivative.data(),retained,retainedResidual.data(),J);
+    }
+    retainedCost<<<(retainedRows+127)/128,128,0,stream>>>(retainedResidual.data(),retainedRows,metric.data()+metricIndex,invalid.data()+invalidIndex);
+    if(J) accumulateRetained<<<(retained*(retained+1)+127)/128,128,0,stream>>>(J,retainedResidual.data(),retainedRows,retained,
+        pose.data(),gradient.data());
+    return cudaGetLastError()==cudaSuccess;
+}
+
+bool VisualCudaBatch::linearizeRetained() {
+    auto& s=*impl_;
+    const bool ok=s.evaluateRetained(s.parameters.data(),true,0,0);
+    if(!ok) s.finishPending();
+    return ok;
+}
+
+bool VisualCudaBatch::readNormal(double* H,double* g,double& cost,double& residualSquaredNorm) {
+    auto& s=*impl_;
+    const int n=s.retained;
+    if(n<1 || s.eliminated) return false;
+    s.pending=true;
+    bool ok=cudaMemsetAsync(s.metric.data()+1,0,sizeof(double),s.stream)==cudaSuccess;
+    if(ok && s.visualRows) retainedCost<<<(s.visualRows+127)/128,128,0,s.stream>>>(s.whiteResiduals.data(),
+        s.visualRows,s.metric.data()+1,s.invalid.data());
+    if(ok && s.retainedRows) retainedCost<<<(s.retainedRows+127)/128,128,0,s.stream>>>(s.retainedResidual.data(),
+        s.retainedRows,s.metric.data()+1,s.invalid.data());
+    double metrics[2]{};
+    int invalid=1;
+    const auto download=[&](auto* target,const auto* source,std::size_t count) {
+        return cudaMemcpyAsync(target,source,count*sizeof(*source),cudaMemcpyDeviceToHost,s.stream)==cudaSuccess;
+    };
+    ok=ok && cudaGetLastError()==cudaSuccess && download(H,s.pose.data(),std::size_t(n)*n) && download(g,s.gradient.data(),n)
+        && download(metrics,s.metric.data(),2) && download(&invalid,s.invalid.data(),1);
+    if(!s.finishPending() || !ok || invalid || !std::isfinite(metrics[0]) || !std::isfinite(metrics[1])) return false;
+    cost=metrics[0]; residualSquaredNorm=2*metrics[1];
+    return true;
+}
+
+bool VisualCudaBatch::configureResident(const std::vector<GpuVariable>& variables,const std::vector<double>& lower,const std::vector<double>& upper) {
+    auto& s=*impl_;
+    const int n=s.retained+s.eliminated;
+    if(variables.empty() || lower.size()!=std::size_t(n) || upper.size()!=lower.size() ||
+        !s.variables.reserve(variables.size()) || !s.hostVariables.reserve(variables.size()) || !s.candidate.reserve(s.parameterSize) ||
+        !s.absoluteLower.reserve(n) || !s.absoluteUpper.reserve(n) || !s.lower.reserve(n) || !s.upper.reserve(n) ||
+        !s.hostLower.reserve(n) || !s.hostUpper.reserve(n)) return false;
+    const auto upload=[&](auto& device,auto& host,const auto& source) {
+        std::copy(source.begin(),source.end(),host.data());
+        return cudaMemcpyAsync(device.data(),host.data(),source.size()*sizeof(source[0]),cudaMemcpyHostToDevice,s.stream)==cudaSuccess;
+    };
+    s.pending=true;
+    if(!upload(s.variables,s.hostVariables,variables) || !upload(s.absoluteLower,s.hostLower,lower) ||
+        !upload(s.absoluteUpper,s.hostUpper,upper)) { s.finishPending(); return false; }
+    s.residentCount=int(variables.size());
+    prepareResidentVariables<<<(s.residentCount+127)/128,128,0,s.stream>>>(s.variables.data(),s.residentCount,s.parameters.data(),
+        s.absoluteLower.data(),s.absoluteUpper.data(),s.lower.data(),s.upper.data(),s.lifts.data());
+    return cudaGetLastError()==cudaSuccess;
+}
+
+bool VisualCudaBatch::linearizeResident() {
+    auto& s=*impl_;
+    if(!s.residentCount || !s.finishPending()) return false;
+    s.pending=true;
+    prepareResidentVariables<<<(s.residentCount+127)/128,128,0,s.stream>>>(s.variables.data(),s.residentCount,s.parameters.data(),
+        s.absoluteLower.data(),s.absoluteUpper.data(),s.lower.data(),s.upper.data(),s.lifts.data());
+    return cudaGetLastError()==cudaSuccess && s.launchVisualLinearization() && linearizeRetained();
+}
+
+void VisualCudaBatch::acceptResident() { impl_->parameters.swap(impl_->candidate); }
+
+bool VisualCudaBatch::readResident(std::vector<double>& values) {
+    auto& s=*impl_;
+    if(!s.residentCount || !s.finishPending()) return false;
+    s.pending=true;
+    const bool ok=cudaMemcpyAsync(s.hostParameters.data(),s.parameters.data(),s.parameterSize*sizeof(double),
+        cudaMemcpyDeviceToHost,s.stream)==cudaSuccess;
+    if(!s.finishPending() || !ok) return false;
+    values.assign(s.hostParameters.data(),s.hostParameters.data()+s.parameterSize);
+    return true;
+}
+
+bool VisualCudaBatch::Impl::launchTrial(const double* values,int metricIndex) {
+    const int count=visualRows/2,blocks=(count+127)/128;
+    if(cudaMemsetAsync(metric.data()+metricIndex,0,sizeof(double),stream)!=cudaSuccess) return false;
+    evaluateVisual<<<blocks,128,0,stream>>>(inputs.data(),count,values,residuals.data(),nullptr);
+    visualCost<<<blocks,128,0,stream>>>(residuals.data(),layout.data(),count,metric.data()+metricIndex,invalid.data()+1);
+    return cudaGetLastError()==cudaSuccess && evaluateRetained(values,false,metricIndex,1);
+}
+
+bool VisualCudaBatch::trialCost(const std::vector<double>& values,double& cost) {
+    auto& s=*impl_;
+    if(!s.finishPending() || s.visualRows<=0 || !s.parameters.reserve(values.size()) ||
+        !s.hostParameters.reserve(values.size())) return false;
+    std::copy(values.begin(),values.end(),s.hostParameters.data());
+    s.pending=true;
+    // The accepted normal blocks and their cost survive a rejected trial.
+    bool ok=cudaMemcpyAsync(s.parameters.data(),s.hostParameters.data(),values.size()*sizeof(double),
+        cudaMemcpyHostToDevice,s.stream)==cudaSuccess &&
+        cudaMemsetAsync(s.invalid.data()+1,0,sizeof(int),s.stream)==cudaSuccess;
+    if(ok) {
+        ok=s.launchTrial(s.parameters.data(),1) &&
+            cudaMemcpyAsync(s.hostMetrics.data()+1,s.metric.data()+1,sizeof(double),cudaMemcpyDeviceToHost,s.stream)==cudaSuccess &&
+            cudaMemcpyAsync(s.hostInvalid.data(),s.invalid.data()+1,sizeof(int),cudaMemcpyDeviceToHost,s.stream)==cudaSuccess;
+    }
+    if(!s.finishPending() || !ok || *s.hostInvalid.data()) return false;
+    cost=s.hostMetrics.data()[1];
+    return std::isfinite(cost);
 }
 
 namespace {
@@ -471,5 +857,102 @@ bool VisualCudaBatch::directNormal(const std::vector<VisualBatchInput>& factors,
     return cudaGetLastError()==cudaSuccess &&
         formNormal(rowBuffer.data(),colBuffer.data(),jacobians.data(),r.data(),int(2*factors.size()),
             partition,int(retained.size()),out);
+}
+
+struct MarginalCudaWorkspace::Impl {
+    cudaStream_t stream=nullptr;
+    cusolverDnHandle_t eigen=nullptr;
+    cublasHandle_t blas=nullptr;
+    cuda::Array<double> matrix,values,work,rhs,projected,output;
+    cuda::Array<int> status;
+    bool ready=false;
+    Impl() {
+        ready=cudaStreamCreateWithFlags(&stream,cudaStreamNonBlocking)==cudaSuccess &&
+            cusolverDnCreate(&eigen)==CUSOLVER_STATUS_SUCCESS && cusolverDnSetStream(eigen,stream)==CUSOLVER_STATUS_SUCCESS &&
+            cublasCreate(&blas)==CUBLAS_STATUS_SUCCESS && cublasSetStream(blas,stream)==CUBLAS_STATUS_SUCCESS;
+    }
+    ~Impl() {
+        if(stream) cudaStreamSynchronize(stream);
+        if(blas) cublasDestroy(blas);
+        if(eigen) cusolverDnDestroy(eigen);
+        if(stream) cudaStreamDestroy(stream);
+    }
+    bool copy(double* to,const double* from,std::size_t count,cudaMemcpyKind kind) const {
+        return cudaMemcpyAsync(to,from,count*sizeof(double),kind,stream)==cudaSuccess;
+    }
+    bool finish(bool ok) const { return cudaStreamSynchronize(stream)==cudaSuccess && ok; }
+    bool decompose(const double* H,int n) {
+        if(!ready || n<1 || n>4000 || !matrix.reserve(std::size_t(n)*n) || !values.reserve(n) || !status.reserve(1)) return false;
+        int lwork=0;
+        if(cusolverDnDsyevd_bufferSize(eigen,CUSOLVER_EIG_MODE_VECTOR,CUBLAS_FILL_MODE_LOWER,n,matrix.data(),n,
+            values.data(),&lwork)!=CUSOLVER_STATUS_SUCCESS || lwork<1 || !work.reserve(lwork)) return false;
+        int info=-1;
+        const bool ok=copy(matrix.data(),H,std::size_t(n)*n,cudaMemcpyHostToDevice) &&
+            cusolverDnDsyevd(eigen,CUSOLVER_EIG_MODE_VECTOR,CUBLAS_FILL_MODE_LOWER,n,matrix.data(),n,
+                values.data(),work.data(),lwork,status.data())==CUSOLVER_STATUS_SUCCESS &&
+            cudaMemcpyAsync(&info,status.data(),sizeof(info),cudaMemcpyDeviceToHost,stream)==cudaSuccess;
+        return finish(ok) && info==0;
+    }
+};
+
+MarginalCudaWorkspace::MarginalCudaWorkspace()=default;
+MarginalCudaWorkspace::~MarginalCudaWorkspace()=default;
+
+namespace {
+__global__ void applyEigenCutoff(double* rhs,const double* eigenvalues,int n,int count,double absCut,double relCut,int* status) {
+    const int i=int(blockIdx.x*blockDim.x+threadIdx.x);
+    if(i>=count) return;
+    const double cutoff=fmax(absCut,relCut*fmax(0.,eigenvalues[n-1])),v=eigenvalues[i%n];
+    if(v< -10*cutoff || !isfinite(v)) atomicExch(status,1);
+    rhs[i]=v>cutoff?rhs[i]/v:0;
+}
+}
+
+bool MarginalCudaWorkspace::eigen(const double* H,int n,double* eigenvalues,double* eigenvectors) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if(!impl_) impl_=std::make_unique<Impl>();
+    auto& s=*impl_;
+    if(!s.decompose(H,n)) return false;
+    return s.finish(s.copy(eigenvalues,s.values.data(),n,cudaMemcpyDeviceToHost) &&
+        s.copy(eigenvectors,s.matrix.data(),std::size_t(n)*n,cudaMemcpyDeviceToHost));
+}
+
+bool MarginalCudaWorkspace::psdSolve(const double* H,const double* rhs,int n,int columns,double absCut,double relCut,double* solution) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if(!impl_) impl_=std::make_unique<Impl>();
+    auto& s=*impl_;
+    if(columns<1 || columns>4001 || !s.decompose(H,n)) return false;
+    const int count=n*columns;
+    if(!s.rhs.reserve(count) || !s.projected.reserve(count) || !s.output.reserve(count)) return false;
+    const double one=1,zero=0;
+    if(!s.copy(s.rhs.data(),rhs,count,cudaMemcpyHostToDevice) ||
+        cublasDgemm(s.blas,CUBLAS_OP_T,CUBLAS_OP_N,n,columns,n,&one,s.matrix.data(),n,s.rhs.data(),n,&zero,
+            s.projected.data(),n)!=CUBLAS_STATUS_SUCCESS) return s.finish(false);
+    applyEigenCutoff<<<(count+127)/128,128,0,s.stream>>>(s.projected.data(),s.values.data(),n,count,absCut,relCut,s.status.data());
+    int invalid=1;
+    const bool ok=cudaGetLastError()==cudaSuccess && cublasDgemm(s.blas,CUBLAS_OP_N,CUBLAS_OP_N,n,columns,n,&one,
+        s.matrix.data(),n,s.projected.data(),n,&zero,s.output.data(),n)==CUBLAS_STATUS_SUCCESS &&
+        s.copy(solution,s.output.data(),count,cudaMemcpyDeviceToHost) &&
+        cudaMemcpyAsync(&invalid,s.status.data(),sizeof(invalid),cudaMemcpyDeviceToHost,s.stream)==cudaSuccess;
+    return s.finish(ok) && !invalid;
+}
+
+bool MarginalCudaWorkspace::subtract(const double* coupling,const double* solution,int nm,int nr,double* H,double* g) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if(!impl_) impl_=std::make_unique<Impl>();
+    auto& s=*impl_;
+    if(!s.ready || nm<1 || nr<1 || nm>4000 || nr>4000) return false;
+    if(!s.matrix.reserve(std::size_t(nm)*nr) || !s.rhs.reserve(std::size_t(nm)*(nr+1)) ||
+        !s.output.reserve(std::size_t(nr)*(nr+1))) return false;
+    const double minus=-1,one=1;
+    const bool ok=s.copy(s.matrix.data(),coupling,std::size_t(nm)*nr,cudaMemcpyHostToDevice) &&
+        s.copy(s.rhs.data(),solution,std::size_t(nm)*(nr+1),cudaMemcpyHostToDevice) &&
+        s.copy(s.output.data(),H,std::size_t(nr)*nr,cudaMemcpyHostToDevice) &&
+        s.copy(s.output.data()+nr*nr,g,nr,cudaMemcpyHostToDevice) &&
+        cublasDgemm(s.blas,CUBLAS_OP_T,CUBLAS_OP_N,nr,nr+1,nm,&minus,s.matrix.data(),nm,s.rhs.data(),nm,
+            &one,s.output.data(),nr)==CUBLAS_STATUS_SUCCESS &&
+        s.copy(H,s.output.data(),std::size_t(nr)*nr,cudaMemcpyDeviceToHost) &&
+        s.copy(g,s.output.data()+nr*nr,nr,cudaMemcpyDeviceToHost);
+    return s.finish(ok);
 }
 }

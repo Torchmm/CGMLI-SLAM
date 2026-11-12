@@ -480,6 +480,23 @@ void oldestSchurKeepsIdentityWithoutReusingEvidence() {
     const auto reference=Marginalizer(denseOptions).compute(referenceGraph,{BlockKey::pose(StateId(1)),
         BlockKey::speedBias(StateId(1)),{BlockKind::Landmark,1},{BlockKind::Landmark,2}});
     require(reference.success && reference.prior,"independent joint dense Schur reference");
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    int devices=0;
+    if(cudaGetDeviceCount(&devices)==cudaSuccess && devices) {
+        auto gpuOptions=options;
+        gpuOptions.visualBatchMode=VisualBatchMode::Schur;
+        const auto device=Marginalizer(gpuOptions).compute(referenceGraph,{BlockKey::pose(StateId(1)),
+            BlockKey::speedBias(StateId(1)),{BlockKind::Landmark,1},{BlockKind::Landmark,2}});
+        require(device.success && device.prior && device.priorRank==reference.priorRank && device.linearization.gpuFactors && device.linearization.gpuNormal
+            && device.linearization.gpuSchur && device.linearization.gpuEigen,"CUDA marginalization computes the same observable rank");
+        const auto& A=device.prior->squareRootInformation();
+        const auto& B=reference.prior->squareRootInformation();
+        require((A.transpose()*A-B.transpose()*B).norm()<1e-6*(1+(B.transpose()*B).norm()) &&
+            (A.transpose()*device.prior->residualAtReference()-B.transpose()*reference.prior->residualAtReference()).norm()<
+                1e-6*(1+(B.transpose()*reference.prior->residualAtReference()).norm()),
+            "CUDA and CPU marginalized information and gradients agree");
+    }
+#endif
     const auto result=window.marginalize(MarginalizationPolicy::MARGIN_OLD);
     require(result.success && result.schurPreservedTracks.size()==2 && result.scalarSchurLandmarks==2
         && result.retiredLandmarks.empty() && result.priorLandmarks==0,"OLD consumes visual information and retains appearance IDs");
@@ -646,7 +663,7 @@ void onlineSchurMatchesJointCpuSolve() {
     const auto reference=BackendOptimizer(options).optimize(cpu,{},{});
     options.visualBatchMode=VisualBatchMode::Schur;
     const auto direct=BackendOptimizer(options).optimize(gpu,{},{});
-    require(reference.accepted && direct.accepted && direct.linearSolverUsed=="GPU_SCHUR_CPU_LDLT",
+    require(reference.accepted && direct.accepted && direct.linearSolverUsed=="GPU_SCHUR_CHOLESKY",
         "joint visual and retained-state system takes the native Schur path");
     require(std::abs(direct.initialCost-reference.initialCost)<1e-9 &&
         std::abs(direct.finalCost-reference.finalCost)<1e-7,"joint Schur cost agrees with Ceres");
@@ -660,7 +677,7 @@ void onlineSchurMatchesJointCpuSolve() {
     range.value[0]=1.05*fixture.rho(1,0,0);
     range.lower=Eigen::VectorXd::Constant(1,floor);
     const auto projected=BackendOptimizer(options).optimize(bounded,{},{});
-    require(projected.accepted && projected.linearSolverUsed=="GPU_SCHUR_CPU_LDLT" &&
+    require(projected.accepted && projected.linearSolverUsed=="GPU_SCHUR_CHOLESKY" &&
         projected.finalCost<projected.initialCost && std::abs(range.value[0]-floor)<1e-6,
         "bounded range uses the projected Schur step and its matching predicted decrease");
 
@@ -668,7 +685,7 @@ void onlineSchurMatchesJointCpuSolve() {
         Eigen::Matrix<double,1,1>::Identity())).accepted(),"add retained cost depending on an eliminated range");
     auto unsupported=backend.window().graph();
     const auto fallback=BackendOptimizer(options).optimize(unsupported,{},{});
-    require(fallback.accepted && fallback.linearSolverUsed!="GPU_SCHUR_CPU_LDLT",
+    require(fallback.accepted && fallback.linearSolverUsed!="GPU_SCHUR_CHOLESKY",
         "range-dependent nonvisual factor falls back without omitting the factor");
 #endif
 }

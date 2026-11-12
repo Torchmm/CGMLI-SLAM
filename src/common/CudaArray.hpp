@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 #include <cstddef>
+#include <utility>
 
 namespace cgmli::cuda {
 
@@ -25,6 +26,10 @@ public:
         return true;
     }
     T* data() const { return pointer_; }
+    void swap(Array& other) noexcept {
+        std::swap(pointer_,other.pointer_);
+        std::swap(capacity_,other.capacity_);
+    }
 private:
     void release() {
         if(pointer_) {

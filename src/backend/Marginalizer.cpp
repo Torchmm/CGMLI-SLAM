@@ -1,11 +1,14 @@
 #include "Marginalizer.hpp"
 #include "BackendProblem.hpp"
+#include "VisualCudaBatch.hpp"
+#include "GpuRetainedPacking.hpp"
 #include <Eigen/Eigenvalues>
 #include <Eigen/SparseCore>
 #include <system_error>
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <numeric>
 
 namespace cgmli { namespace backend {
 namespace {
@@ -59,8 +62,75 @@ bool accumulateNormalEquations(const ::ceres::CRSMatrix& jacobian, const Eigen::
     result.timing.normalThreads=threadCount;
     return true;
 }
+#ifdef CGMLI_ENABLE_CUDA_ORB
+bool linearizeDevice(const BackendGraph& graph,const std::vector<FactorId>& factors,bool includePrior,bool applyLoss,
+    double huberScale,int n,LinearizedSystem& out,const std::shared_ptr<detail::VisualCudaWorkspace>& workspace) {
+    if(n<1 || n>4000) return false;
+    VisualEvaluationCache cache;
+    cache.configureBatch(VisualBatchMode::Schur,workspace);
+    std::map<BlockKey,detail::GpuVariable> blocks;
+    std::vector<double> plus;
+    for(size_t i=0;i<out.keys.size();++i) {
+        const auto key=out.keys[i];
+        const auto& p=graph.blocks.at(key);
+        auto& block=blocks[key];
+        auto& state=block.state;
+        state.size=int(p.value.size()); state.width=p.tangentSize(); state.column=out.offsets[i];
+        state.offset=cache.bindSchurParameter(p.value.data(),state.size);
+        block.lift=int(plus.size()); plus.resize(plus.size()+state.size*state.width,0);
+        if(p.manifold) {
+            if(!dynamic_cast<const LeftSE3Manifold*>(p.manifold.get()) || state.size!=7 || state.width!=6 ||
+                !p.manifold->PlusJacobian(p.value.data(),plus.data()+block.lift)) return false;
+            state.chart=detail::GpuChart::LeftSE3;
+        } else {
+            if(state.size>9) return false;
+            for(int j=0;j<state.width;++j) plus[block.lift+j*(state.width+1)]=1;
+        }
+    }
+    const auto packBlock=[&](BlockKey key,detail::GpuRetainedBlock& state) {
+        state=blocks.at(key).state; return true;
+    };
+    detail::GpuRetainedFactors retained;
+    if(includePrior && graph.prior && !detail::packGpuPrior(*graph.prior,packBlock,retained)) return false;
+    std::vector<detail::DirectVisualLayout> layout;
+    for(auto id:factors) {
+        const auto& f=graph.factors.at(id);
+        if(f.kind!=FactorKind::Visual) {
+            if(!detail::packGpuRetainedFactor(f,applyLoss,packBlock,retained)) return false;
+            continue;
+        }
+        detail::DirectVisualLayout row;
+        if(f.keys.size()>5 || !detail::packGpuVisualLoss(f,applyLoss,huberScale,row)) return false;
+        std::vector<const double*> parameters;
+        for(size_t j=0;j<f.keys.size();++j) {
+            const auto key=f.keys[j];
+            const auto& block=blocks.at(key);
+            row.column[j]=block.state.column; row.width[j]=block.state.width; row.plus[j]=block.lift;
+            parameters.push_back(graph.blocks.at(key).value.data());
+        }
+        if(!cacheWindowVisualCost(*f.cost,parameters,cache) || cache.batchFactors()!=layout.size()+1) return false;
+        layout.push_back(row);
+    }
+    auto* device=cache.linearizeSchur(layout,plus,n,0,true);
+    if(!device || !device->configureRetained(retained) || !device->linearizeRetained()) return false;
+    using RowMatrix=Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor>;
+    RowMatrix upper(n,n);
+    out.b.resize(n);
+    if(!device->readNormal(upper.data(),out.b.data(),out.robustCost,out.residualSquaredNorm)) return false;
+    out.H=upper.selfadjointView<Eigen::Upper>();
+    return out.H.allFinite() && out.b.allFinite();
 }
-Marginalizer::Marginalizer(const BackendOptions& o) : options_(o) { options_.validate(); }
+#endif
+}
+Marginalizer::Marginalizer(const BackendOptions& o) : options_(o) {
+    options_.validate();
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    if(options_.visualBatchMode==VisualBatchMode::Schur) {
+        visualCuda_=std::make_shared<detail::VisualCudaWorkspace>();
+        marginalCuda_=std::make_shared<detail::MarginalCudaWorkspace>();
+    }
+#endif
+}
 bool Marginalizer::linearize(BackendGraph& graph, const std::vector<FactorId>& factors,
     bool includePrior, bool applyLoss, LinearizedSystem& out, std::string& error) const {
     out=LinearizedSystem();
@@ -80,19 +150,32 @@ bool Marginalizer::linearize(BackendGraph& graph, const std::vector<FactorId>& f
     }
     if (includePrior && graph.prior) keys.insert(graph.prior->keys().begin(),graph.prior->keys().end());
     if (keys.empty()) { out.H.resize(0,0); out.b.resize(0); return true; }
+    int n=0;
+    for (auto k:keys)
+    {
+        const auto& p=graph.blocks.at(k);
+        out.keys.push_back(k); out.offsets.push_back(n); out.sizes.push_back(p.tangentSize()); n+=p.tangentSize();
+    }
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    if(options_.visualBatchMode==VisualBatchMode::Schur) {
+        const auto gpuStarted=Clock::now();
+        if(linearizeDevice(graph,factors,includePrior,applyLoss,options_.visualHuberScale,n,out,visualCuda_)) {
+            out.timing.setupMs=std::chrono::duration<double,std::milli>(gpuStarted-setupStarted).count();
+            out.timing.normalMs=std::chrono::duration<double,std::milli>(Clock::now()-gpuStarted).count();
+            out.timing.gpuFactors=true; out.timing.gpuNormal=true;
+            return true;
+        }
+    }
+#endif
     ::ceres::Problem problem(detail::problemOptions());
     ::ceres::Problem::EvaluateOptions eval;
     eval.apply_loss_function=applyLoss;
     eval.num_threads=options_.numThreads;
-    int n=0;
-    for (auto k:keys)
-    {
+    for(auto k:keys) {
         auto& p=graph.blocks.at(k);
-        // Ignore temporary optimization freezing here. Dropping those Jacobians would
-        // permanently lose calibration dependence when a block is later unlocked.
+        // Marginalization preserves the derivative of temporarily frozen blocks.
         detail::addBlock(problem,p,false);
         eval.parameter_blocks.push_back(p.value.data());
-        out.keys.push_back(k); out.offsets.push_back(n); out.sizes.push_back(p.tangentSize()); n+=p.tangentSize();
     }
 
     for (auto id:factors) detail::addFactor(problem,graph,graph.factors.at(id));
@@ -113,6 +196,20 @@ bool Marginalizer::linearize(BackendGraph& graph, const std::vector<FactorId>& f
     out.timing.evaluateMs=std::chrono::duration<double,std::milli>(normalStarted-evaluateStarted).count();
     const Eigen::Map<const Eigen::VectorXd> r(residuals.data(),static_cast<int>(residuals.size()));
     out.robustCost=cost; out.residualSquaredNorm=r.squaredNorm();
+    bool gpuNormal=false;
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    if(options_.visualBatchMode==VisualBatchMode::Schur) {
+        std::vector<int> retained(n);
+        std::iota(retained.begin(),retained.end(),0);
+        detail::VisualNormalSystem normal;
+        if(detail::cudaVisualNormalSystem(sparse.rows,sparse.cols,sparse.values,residuals,n,retained,{},normal)) {
+            using RowMatrix=Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor>;
+            out.H=Eigen::Map<const RowMatrix>(normal.H.data(),n,n);
+            out.b=Eigen::Map<const Eigen::VectorXd>(normal.g.data(),n);
+            gpuNormal=out.H.allFinite() && out.b.allFinite();
+        }
+    }
+#endif
     // Keep thread creation away from small priors and cap temporary dense storage.
     const int normalThreads=std::min({4,options_.numThreads,sparse.num_rows/128});
     bool useParallel=options_.parallelNormalEquations && normalThreads>1 && n<=768 && sparse.values.size()>=2048;
@@ -126,7 +223,7 @@ bool Marginalizer::linearize(BackendGraph& graph, const std::vector<FactorId>& f
         // lightly connected system where the existing Eigen product is cheaper.
         useParallel=products>=size_t(n)*n*normalThreads/2;
     }
-    if (!useParallel || !accumulateNormalEquations(sparse,r,normalThreads,out)) {
+    if (!gpuNormal && (!useParallel || !accumulateNormalEquations(sparse,r,normalThreads,out))) {
         std::vector<Eigen::Triplet<double>> entries;
         entries.reserve(sparse.values.size());
         for (int row=0;row<sparse.num_rows;++row)
@@ -136,6 +233,7 @@ bool Marginalizer::linearize(BackendGraph& graph, const std::vector<FactorId>& f
         out.H=Eigen::MatrixXd(J.transpose()*J); out.b=J.transpose()*r;
     }
     out.timing.normalMs=std::chrono::duration<double,std::milli>(Clock::now()-normalStarted).count();
+    out.timing.gpuNormal=gpuNormal;
     if (!out.H.allFinite() || !out.b.allFinite()) { error="nonfinite normal equations"; return false; }
     return true;
 }
@@ -161,7 +259,15 @@ bool Marginalizer::psdSolve(const Eigen::MatrixXd& H, const Eigen::MatrixXd& rhs
         }
         return x.allFinite();
     }
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(0.5*(H+H.transpose()));
+    const Eigen::MatrixXd symmetric=0.5*(H+H.transpose());
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    if(options_.visualBatchMode==VisualBatchMode::Schur) {
+        x.resize(rhs.rows(),rhs.cols());
+        if(marginalCuda_->psdSolve(symmetric.data(),rhs.data(),int(rhs.rows()),int(rhs.cols()),
+            options_.absoluteEigenThreshold,options_.relativeEigenThreshold,x.data()) && x.allFinite()) return true;
+    }
+#endif
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(symmetric);
     if (eig.info()!=Eigen::Success) { error="PSD eigensolve failed"; return false; }
     const double cutoff=std::max(options_.absoluteEigenThreshold,
         options_.relativeEigenThreshold*std::max(0.0,eig.eigenvalues().maxCoeff()));
@@ -247,6 +353,23 @@ MarginalizationResult Marginalizer::compute(BackendGraph& graph, const std::set<
         br[i]=lin.b[r[i]];
         for (int j=0;j<nr;++j) Hrr(i,j)=lin.H(r[i],r[j]);
     }
+    const auto subtract=[&](const Eigen::MatrixXd& coupling,const Eigen::MatrixXd& solution,
+        Eigen::MatrixXd& H,Eigen::VectorXd& gradient) {
+#ifdef CGMLI_ENABLE_CUDA_ORB
+        if(options_.visualBatchMode==VisualBatchMode::Schur && coupling.rows()) {
+            Eigen::MatrixXd deviceH=H;
+            Eigen::VectorXd deviceGradient=gradient;
+            if(marginalCuda_->subtract(coupling.data(),solution.data(),int(coupling.rows()),int(coupling.cols()),
+                deviceH.data(),deviceGradient.data()) && deviceH.allFinite() && deviceGradient.allFinite()) {
+                H.swap(deviceH); gradient.swap(deviceGradient);
+                out.linearization.gpuSchur=true;
+                return;
+            }
+        }
+#endif
+        H.noalias()-=coupling.transpose()*solution.leftCols(coupling.cols());
+        gradient.noalias()-=coupling.transpose()*solution.rightCols(1);
+    };
     if(options_.landmarkFirstMarginalization) {
         std::vector<int> ranges,states;
         for(size_t k=0;k<lin.keys.size();++k) if(eliminate.count(lin.keys[k])) {
@@ -279,8 +402,7 @@ MarginalizationResult Marginalizer::compute(BackendGraph& graph, const std::set<
                 reduced.col(i).tail(nr)=Hmr.row(states[i]).transpose();
             }
             reduced.bottomRightCorner(nr,nr)=Hrr; gradient.tail(nr)=br;
-            reduced.noalias()-=coupling.transpose()*solvedL.leftCols(ns+nr);
-            gradient.noalias()-=coupling.transpose()*solvedL.rightCols(1);
+            subtract(coupling,solvedL,reduced,gradient);
             Hmm=reduced.topLeftCorner(ns,ns); Hmr=reduced.topRightCorner(ns,nr); Hrr=reduced.bottomRightCorner(nr,nr);
             bm=gradient.head(ns); br=gradient.tail(nr); out.scalarSchurLandmarks=nl;
         }
@@ -295,23 +417,35 @@ MarginalizationResult Marginalizer::compute(BackendGraph& graph, const std::set<
     formation.eliminatedReduction+=0.5*bm.dot(solved.col(nr));
     // Reuse the partition buffers for the dense separator instead of allocating
     // another nr-by-nr product/subtraction result at the peak working-set size.
-    Hrr.noalias()-=Hmr.transpose()*solved.leftCols(nr);
-    br.noalias()-=Hmr.transpose()*solved.rightCols(1);
+    subtract(Hmr,solved,Hrr,br);
     Eigen::MatrixXd H=std::move(Hrr);
     const Eigen::VectorXd b=std::move(br);
     H=(0.5*(H+H.transpose())).eval();
     const auto priorStarted=std::chrono::steady_clock::now();
     out.schurMs=std::chrono::duration<double,std::milli>(priorStarted-schurStarted).count();
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(H);
-    if (eig.info()!=Eigen::Success || !b.allFinite()) { out.message="Schur eigensolve failed"; return out; }
+    Eigen::VectorXd eigenvalues(nr);
+    Eigen::MatrixXd eigenvectors(nr,nr);
+    bool gpuEigen=false;
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    if(options_.visualBatchMode==VisualBatchMode::Schur)
+        gpuEigen=marginalCuda_->eigen(H.data(),nr,eigenvalues.data(),eigenvectors.data()) &&
+            eigenvalues.allFinite() && eigenvectors.allFinite();
+#endif
+    out.linearization.gpuEigen=gpuEigen;
+    if(!gpuEigen) {
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(H);
+        if(eig.info()!=Eigen::Success) { out.message="Schur eigensolve failed"; return out; }
+        eigenvalues=eig.eigenvalues(); eigenvectors=eig.eigenvectors();
+    }
+    if(!b.allFinite()) { out.message="Schur eigensolve failed"; return out; }
     const double cutoff=std::max(options_.absoluteEigenThreshold,
-        options_.relativeEigenThreshold*std::max(0.0,eig.eigenvalues().maxCoeff()));
+        options_.relativeEigenThreshold*std::max(0.0,eigenvalues.maxCoeff()));
     formation.eigenCutoff=cutoff; formation.retainedGradientNorm=b.norm();
-    if (eig.eigenvalues().minCoeff() < -10.0*cutoff) { out.message="Schur prior is indefinite"; return out; }
+    if (eigenvalues.minCoeff() < -10.0*cutoff) { out.message="Schur prior is indefinite"; return out; }
     double droppedGradientSquared=0;
     for (int i=0;i<nr;++i) {
-        if (eig.eigenvalues()[i]>cutoff) ++out.priorRank;
-        else { const double v=eig.eigenvectors().col(i).dot(b); droppedGradientSquared+=v*v; }
+        if (eigenvalues[i]>cutoff) ++out.priorRank;
+        else { const double v=eigenvectors.col(i).dot(b); droppedGradientSquared+=v*v; }
     }
     formation.droppedGradientNorm=std::sqrt(droppedGradientSquared);
     // Rank zero means no observable retained information, not an identity/diagonal prior.
@@ -322,10 +456,10 @@ MarginalizationResult Marginalizer::compute(BackendGraph& graph, const std::set<
         // For positive eigenpairs (lambda,u), choose A_row=sqrt(lambda)*u^T and
         // r0_row=(u^T*b)/sqrt(lambda). Then A^T*A=H and A^T*r0=b in the supported
         // subspace. The omitted constant objective offset does not affect optimization.
-        for (int i=0;i<nr;++i) if (eig.eigenvalues()[i]>cutoff) {
-            const double root=std::sqrt(eig.eigenvalues()[i]);
-            A.row(row)=root*eig.eigenvectors().col(i).transpose();
-            r0[row]=eig.eigenvectors().col(i).dot(b)/root; ++row;
+        for (int i=0;i<nr;++i) if (eigenvalues[i]>cutoff) {
+            const double root=std::sqrt(eigenvalues[i]);
+            A.row(row)=root*eigenvectors.col(i).transpose();
+            r0[row]=eigenvectors.col(i).dot(b)/root; ++row;
         }
         out.prior=std::make_shared<MarginalizationPrior>(refs,A,r0);
         formation.newReferenceNorm=r0.norm();

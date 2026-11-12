@@ -286,6 +286,7 @@ struct PriorFormationStatistics {
 struct LinearizationTiming {
     double setupMs=0, evaluateMs=0, normalMs=0;
     int normalThreads=1;
+    bool gpuFactors=false,gpuNormal=false,gpuSchur=false,gpuEigen=false;
 };
 
 /// Topology-change receipt. Dimensions count participating tangent coordinates;

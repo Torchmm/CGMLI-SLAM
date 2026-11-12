@@ -8,6 +8,10 @@
 #include <backend/BackendFactors.hpp>
 #include <backend/FrameStore.hpp>
 #include <backend/ProjectBackendAdapter.hpp>
+#include <backend/GpuRetainedFactorMath.hpp>
+#ifdef CGMLI_ENABLE_CUDA_ORB
+#include <cuda_runtime_api.h>
+#endif
 #include <limits>
 #include <cameras/PinholeCamera.hpp>
 #include <cameras/EucmCamera.hpp>
@@ -513,6 +517,20 @@ void scopedPoseVelocityKeepsWindowAndCalibration() {
     require(newOnly.marginalization && newOnly.marginalization->removed==StateId(2)
         && newOnly.marginalization->replacedImuFactors==2,
         "scoped solve with large new-edge NIS still evicts and merges the IMU bridge");
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    int devices=0;
+    if(cudaGetDeviceCount(&devices)==cudaSuccess && devices) {
+        options.visualBatchMode=VisualBatchMode::Schur;
+        FixedLagBackend device(options);
+        populate(device,0);
+        const auto step=device.step({}, {}, {}, {}, {}, budget);
+        require(step.accepted && step.solve.linearSolverUsed=="GPU_DENSE_CHOLESKY" && step.solve.effectiveParameters==18,
+            "two-frame problem takes the native GPU solve with no free landmarks");
+        require(std::abs(step.solve.initialCost-accepted.solve.initialCost)<1e-7 &&
+            step.solve.finalCost<=step.solve.initialCost && step.solve.postSolveResiduals[1].maxNis<1,
+            "GPU lightweight solve agrees with the host objective and respects IMU geometry");
+    }
+#endif
 }
 void longImuIntervalsAreStorageOnly() {
     const auto p=parameters(); const auto data=samples(25.0); backend::BackendOptions options;
@@ -678,6 +696,33 @@ void dynamicBodyImuJacobiansAndIntervals() {
     double* J[]{jp[0].data(),jb[0].data(),jp[1].data(),jb[1].data()};
     Eigen::Matrix<double,15,1> r;
     require(direct.cost->Evaluate(x,r.data(),J),"dynamic nonzero residual Evaluate");
+    {
+        using namespace backend::detail;
+        GpuImuFactor gpu;
+        require(factor::exportFrozenImu(*direct.cost,gpu.imu),"export native IMU for CUDA evaluation");
+        std::array<double,32> packed;
+        int offset=0,column=0;
+        for(int i=0;i<4;++i) {
+            const bool isPose=i%2==0;
+            auto& block=gpu.blocks[i];
+            block.offset=offset; block.column=column; block.size=isPose?7:9; block.width=isPose?6:9;
+            std::copy_n(x[i],block.size,packed.data()+offset);
+            offset+=block.size; column+=block.width;
+        }
+        Eigen::Matrix<double,15,1> deviceResidual;
+        Eigen::Matrix<double,15,30,Eigen::RowMajor> deviceJacobian;
+        require(retained_math::evaluateImu(gpu,packed.data(),30,deviceResidual.data(),deviceJacobian.data()),"CUDA IMU equations");
+        require((deviceResidual-r).norm()<1e-8,"CUDA IMU residual agrees with frozen Ceres factor");
+        const backend::LeftSE3Manifold chart;
+        for(int i=0;i<2;++i) {
+            Eigen::Matrix<double,7,6,Eigen::RowMajor> plus;
+            require(chart.PlusJacobian(x[2*i],plus.data()),"CPU pose tangent lift");
+            const Eigen::Matrix<double,15,6> poseReference=jp[i]*plus;
+            require((deviceJacobian.middleCols<6>(15*i)-poseReference).norm()<1e-6*(1+poseReference.norm()) &&
+                (deviceJacobian.middleCols<9>(15*i+6)-jb[i]).norm()<1e-6*(1+jb[i].norm()),
+                "CUDA analytic IMU Jacobians agree with CPU tangents at nonzero motion and bias");
+        }
+    }
     factor::BodyImuJacobianCheck runtimeAudit;
     require(factor::checkBodyImuJacobians(*direct.cost,x,runtimeAudit) && runtimeAudit.columns==30,
         "runtime derivative audit covers both pose and SB tangents");

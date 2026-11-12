@@ -332,6 +332,15 @@
     <ClInclude Include="..\src\backend\VisualBatchAudit.hpp">
       <Filter>源文件\backend</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\backend\GpuRetainedFactors.hpp">
+      <Filter>backend</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\backend\GpuRetainedPacking.hpp">
+      <Filter>backend</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\backend\GpuRetainedFactorMath.hpp">
+      <Filter>backend</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\backend\VisualCudaBatch.hpp">
       <Filter>源文件\backend</Filter>
     </ClInclude>

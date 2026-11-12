@@ -2,6 +2,7 @@
 #include "MarginalizationPrior.hpp"
 
 namespace cgmli { namespace backend {
+namespace detail { struct VisualCudaWorkspace; class MarginalCudaWorkspace; }
 /// Tangent-coordinate normal equations for 0.5 * ||r + J*delta||^2:
 /// H = J^T J, b = J^T r, hence the Gauss-Newton step solves H*delta = -b.
 /// offsets[i]/sizes[i] locate keys[i] within both H and b, not within ambient buffers.
@@ -29,7 +30,7 @@ struct MarginalizationResult {
 };
 
 /**
- * Stateless numerical service used by both window eviction policies.
+ * Numerical service used by both window eviction policies.
  * The caller supplies a set of variables to eliminate; the mathematics does not
  * depend on whether they belong to the oldest or penultimate epoch.
  * Unaffected priors are reused without evaluation/relinearization. Other cases
@@ -55,5 +56,7 @@ public:
         Eigen::MatrixXd& solution, std::string& error) const;
 private:
     BackendOptions options_;
+    std::shared_ptr<detail::VisualCudaWorkspace> visualCuda_;
+    std::shared_ptr<detail::MarginalCudaWorkspace> marginalCuda_;
 };
 } }

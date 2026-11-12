@@ -60,6 +60,8 @@ public:
         const std::vector<int>& retained,const std::vector<int>& eliminated,detail::VisualNormalSystem&) const;
     detail::VisualCudaBatch* linearizeSchur(const std::vector<detail::DirectVisualLayout>&,
         const std::vector<double>& plus,int retained,int ranges,bool newTopology);
+    int bindSchurParameter(const double*,int size);
+    bool schurTrialCost(double&);
     int batchEvaluations=0,batchFailures=0,batchInvalid=0,batchCpuTrials=0;
     std::size_t batchJacobianBytes=0,batchDenseJacobianBytes=0;
     double batchMs=0;

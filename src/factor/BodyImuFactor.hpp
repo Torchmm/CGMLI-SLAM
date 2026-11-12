@@ -1,6 +1,7 @@
 #pragma once
 
 #include <backend/BackendTypes.hpp>
+#include <backend/GpuRetainedFactors.hpp>
 #include <common/Parameters.hpp>
 #include <common/Measurements.hpp>
 
@@ -13,6 +14,8 @@ struct BodyImuDiagnostics {
 };
 /// Read-only diagnostics; physical ordering is p, 2*quaternion-vector, v, bg, ba.
 bool diagnoseBodyImu(const ::ceres::CostFunction&,double const* const*,BodyImuDiagnostics&);
+/// Export the frozen measurement and whitening used by the native cost.
+bool exportFrozenImu(const ::ceres::CostFunction&,backend::detail::FrozenImuData&);
 struct BodyImuJacobianCheck {
     size_t columns=0,failedColumns=0;
     double maxScaledError=0,maxAbsoluteError=0;

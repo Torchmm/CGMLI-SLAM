@@ -116,6 +116,31 @@ detail::VisualCudaBatch* VisualEvaluationCache::linearizeSchur(const std::vector
 #endif
 }
 
+int VisualEvaluationCache::bindSchurParameter(const double* value,int size) {
+    const auto slot=batch_->offsets.try_emplace(value,int(batch_->values.size()));
+    if(slot.second) {
+        batch_->parameters.emplace_back(value,size);
+        batch_->values.resize(batch_->values.size()+size);
+    }
+    return slot.first->second;
+}
+
+bool VisualEvaluationCache::schurTrialCost(double& cost) {
+#ifdef CGMLI_ENABLE_CUDA_ORB
+    if(!batch_ || !batch_->gpu) return false;
+    auto& batch=*batch_;
+    std::size_t offset=0;
+    for(const auto& parameter:batch.parameters) {
+        std::copy_n(parameter.first,parameter.second,batch.values.data()+offset);
+        offset+=parameter.second;
+    }
+    return batch.gpu->trialCost(batch.values,cost);
+#else
+    (void)cost;
+    return false;
+#endif
+}
+
 namespace {
 VisualTimedBearing evaluateTimedBearing(const Eigen::Vector3d& bearing,const Eigen::Vector3d& velocity,
     double reference,double td,bool derivative) {

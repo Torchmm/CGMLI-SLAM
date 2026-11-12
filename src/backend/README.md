@@ -8,7 +8,11 @@
 
 `hybrid` 模式保留 Ceres 优化器和 CUDA 雅可比批处理。仅计算残差的试探点由 Ceres 并行求值 CPU 球面因子。`[VisualBatchSolve]` 的 `cpu_trials` 记录走 CPU 的试探点。
 
-`schur` 是实验模式。首轮完整求解用 GPU 累计视觉正规方程并消去独立逆距离，CPU 合入 IMU、标定和边缘化先验后求解约化系统。压缩后的逆距离块随约化矩阵一并回传，CPU 据此回代并用带损失的 CPU 因子验收试探步。遇到非视觉因子连接自由逆距离、无效步或数值失败时回退 Ceres。外点 refit 和整帧重试也使用 Ceres 的混合路径。`[OnlineSchur]` 记录尝试耗时和回退原因。
+`schur` 是实验模式。首轮完整求解在 GPU 上累加视觉、原生 IMU、FEJ 和原生标定先验的正规方程，消去独立逆距离，用双精度 cuSOLVER Cholesky 求解并回代。支持的窗口把 LM 当前状态、候选状态和地标留在显存中，GPU 计算试探代价及预测下降量，CPU 用回传的标量调节阻尼并在结束后提交状态。双帧轻量求解复用此路径，固定地标并直接求解 18 维状态系统。
+
+仅连接保留变量的其他因子可在 CPU 线性化，GPU 合并正规方程并解约化系统。非视觉因子连接自由逆距离、CUDA 数值失败、外点 refit 或整帧重试时回退 Ceres。`[OnlineSchur]` 记录 `resident`、GPU 因子数、分项耗时与回退原因。
+
+`schur` 模式下，边缘化在 GPU 上线性化支持的因子、累积正规方程、计算 Schur 修正并分解保留系统。遇到不支持的因子和鲁棒损失时，Ceres 提供等价的白化切空间行。边缘化沿用 FEJ 参考点、特征值截断和秩零处理。`[Timing][Backend]` 中的 `marginalize_gpu_factors`、`marginalize_gpu_normal`、`marginalize_gpu_schur` 和 `marginalize_gpu_eigen` 表示实际采用的设备端步骤。
 
 将 `estimator_parameters.backend_visual_batch` 设为 `audit` 后，每 30 帧对同一窗口比较原有 Ceres 求值、主机批量求值和 CUDA 批量求值。`[VisualBatchAudit]` 记录白化残差、切空间雅可比、完整窗口的 `JᵀJ` 和 `Jᵀr`，以及独立逆距离参数可消元时的阻尼 Schur 约化。审计运行仍使用 Ceres 提交估计。
 

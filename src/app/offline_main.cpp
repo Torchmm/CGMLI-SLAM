@@ -87,7 +87,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_); stream_.flush();
     }
     void send(google::LogSeverity severity,const char*,const char* filename,int line,
+#ifdef CGMLI_GLOG_MESSAGE_TIME
+        const google::LogMessageTime& timestamp,const char* message,size_t length) override {
+#else
         const std::tm* timestamp,const char* message,size_t length) override {
+#endif
         std::lock_guard<std::mutex> lock(mutex_);
         stream_<<google::LogSink::ToString(severity,filename,line,timestamp,message,length)<<'\n';
         const auto now=std::chrono::steady_clock::now();

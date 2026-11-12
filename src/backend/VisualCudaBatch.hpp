@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include "GpuRetainedFactors.hpp"
 
 namespace cgmli::backend::detail {
 
@@ -34,17 +35,12 @@ struct DirectVisualLayout {
     double huberScale=0;
 };
 struct VisualNormalSystem;
-struct VisualReducedSystem {
-    const double* H=nullptr; ///< Upper triangle of a row-major symmetric matrix.
-    const double* g=nullptr;
-    const double* diagonal=nullptr;
-    const double* rangeDiagonal=nullptr;
-    const double* rangeGradient=nullptr;
-    const double* rangeCross=nullptr;
-    const int* rangeOffsets=nullptr;
-    const int* rangeColumns=nullptr;
-    double cost=0;
+struct VisualSchurStep {
+    const double* increment=nullptr; ///< State tangents followed by inverse-range increments.
+    double cost=0,predictedReduction=0,trialCost=0,maxIncrement=0;
+    bool trialValid=false;
 };
+const char* takeVisualCudaRuntimeError();
 class VisualCudaBatch {
 public:
     VisualCudaBatch();
@@ -62,7 +58,16 @@ public:
     bool linearizeSchur(const std::vector<VisualBatchInput>&,const std::vector<double>& parameters,
         std::size_t jacobianSize,const std::vector<DirectVisualLayout>&,const std::vector<double>& plus,
         int retained,int ranges,bool newTopology);
-    bool reduceOnline(double lambda,VisualReducedSystem&);
+    bool solveOnline(double lambda,const double* retainedH,const double* retainedG,
+        const std::vector<double>& lower,const std::vector<double>& upper,bool newPoint,VisualSchurStep&);
+    bool configureRetained(const GpuRetainedFactors&);
+    bool linearizeRetained();
+    bool readNormal(double* upperRowMajor,double* gradient,double& cost,double& residualSquaredNorm);
+    bool configureResident(const std::vector<GpuVariable>&,const std::vector<double>& lower,const std::vector<double>& upper);
+    bool linearizeResident();
+    void acceptResident();
+    bool readResident(std::vector<double>&);
+    bool trialCost(const std::vector<double>& parameters,double& cost);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -82,5 +87,20 @@ struct VisualNormalSystem {
 bool cudaVisualNormalSystem(const std::vector<int>& rows,const std::vector<int>& columns,
     const std::vector<double>& values,const std::vector<double>& residuals,int dimensions,
     const std::vector<int>& retained,const std::vector<int>& eliminated,VisualNormalSystem&);
+
+// Reuse the stream, handles and dense buffers across short-lived backend workers.
+// Dense marginalization uses column-major matrices and no LM damping.
+class MarginalCudaWorkspace {
+public:
+    MarginalCudaWorkspace();
+    ~MarginalCudaWorkspace();
+    bool eigen(const double* H,int n,double* eigenvalues,double* eigenvectors);
+    bool psdSolve(const double* H,const double* rhs,int n,int columns,double absoluteCutoff,double relativeCutoff,double* solution);
+    bool subtract(const double* coupling,const double* solution,int eliminated,int retained,double* H,double* g);
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    std::mutex mutex_;
+};
 
 }

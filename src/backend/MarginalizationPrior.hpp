@@ -26,6 +26,7 @@ public:
     const std::vector<BlockKey>& keys() const { return keys_; }
     const std::vector<int>& tangentSizes() const { return tangentSizes_; }
     const std::vector<Eigen::VectorXd>& references() const { return references_; }
+    const ::ceres::Manifold* referenceManifold(size_t index) const { return manifolds_.at(index).get(); }
     const Eigen::MatrixXd& squareRootInformation() const { return A_; }
     const Eigen::VectorXd& residualAtReference() const { return r0_; }
 private:
